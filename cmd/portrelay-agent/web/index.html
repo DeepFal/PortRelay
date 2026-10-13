@@ -452,12 +452,12 @@
         <input type="hidden" id="tunnelId">
         <div class="input-row">
           <div class="form-group" style="flex: 1;">
-            <label id="tunnelNameLabel">通道名称 / 备注</label>
-            <input type="text" id="tunnelName" placeholder="例如：MySQL 实习库 或 财务系统 SSH" oninput="schedulePlan()">
+            <label id="tunnelNameLabel">通道名称</label>
+            <input type="text" id="tunnelName" placeholder="如：订单数据库" oninput="schedulePlan()">
           </div>
           <div class="form-group" style="flex: 1;">
             <label>责任人（可选）</label>
-            <input type="text" id="tunnelOwner" placeholder="例如：张三 / 数据组">
+            <input type="text" id="tunnelOwner" placeholder="负责人或团队，如：数据组">
           </div>
         </div>
         <div class="form-group">
@@ -465,11 +465,12 @@
           <div class="target-head" id="targetHead"><span>主机</span><span>端口</span></div>
           <div id="targetRows"></div>
           <div class="input-row" style="justify-content: space-between; align-items: center;">
-            <button type="button" class="add-member" id="addRowBtn" onclick="addTargetRow()" title="可以一次粘贴多个 IP（每行一个，或用逗号分隔），会自动拆成多行">＋ 添加主机</button>
+            <button type="button" class="add-member" id="addRowBtn" onclick="addTargetRow()" title="也可以直接粘贴多个地址（每行一个或逗号分隔，可带 :端口），会自动拆成多行">＋ 添加主机</button>
             <button type="button" class="btn-secondary btn-sm" onclick="probeTarget()">探测测试</button>
           </div>
           <div class="input-hint" id="probeResult"></div>
           <div class="plan-box" id="tunnelPlan" style="display:none;"></div>
+          <div class="input-hint" id="tunnelAddHint"></div>
         </div>
         <div class="form-group" id="tunnelPortWrap">
           <label>对外监听端口 (范围: 33001 - 34000)</label>
@@ -478,7 +479,7 @@
             <button type="button" class="btn-secondary" onclick="autoRecommendPort()">推荐空闲端口</button>
           </div>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="tunnelGroupWrap">
           <label>通道组</label>
           <div class="input-row">
             <select id="tunnelGroup" onchange="onTunnelGroupChange()"></select>
@@ -523,7 +524,7 @@
             <option value="specific">固定 IP / 网段 + 授权链接</option>
             <option value="all">全部放通 *（不安全）</option>
           </select>
-          <input type="text" id="tunnelWhitelist" style="margin-top: 8px; display: none;" placeholder="例如 192.168.1.100, 192.168.1.0/24（逗号分隔）">
+          <input type="text" id="tunnelWhitelist" style="margin-top: 8px; display: none;" placeholder="IP 或 CIDR 网段，逗号分隔，如 192.168.1.100, 10.0.0.0/24">
           <div class="input-hint" id="accessModeHint"></div>
         </div>
 
@@ -545,7 +546,7 @@
       <div id="inviteForm">
         <div class="form-group">
           <label>备注（发给谁，可选）</label>
-          <input type="text" id="inviteNote" placeholder="例如：张三">
+          <input type="text" id="inviteNote" placeholder="如：张三">
         </div>
         <div class="form-group">
           <label>链接有效期</label>
@@ -607,11 +608,11 @@
         <div class="input-hint" style="margin: -8px 0 14px;">组内地址共用邀请与授权：同事授权一次即可访问整组；组内任一地址在用时，整组都不会闲置关闭。</div>
         <div class="form-group">
           <label>通道组名称</label>
-          <input type="text" id="groupName" required placeholder="例如：订单服务集群">
+          <input type="text" id="groupName" required placeholder="如：订单服务集群">
         </div>
         <div class="form-group">
           <label>责任人（可选）</label>
-          <input type="text" id="groupOwner" placeholder="例如：张三 / 运维组">
+          <input type="text" id="groupOwner" placeholder="负责人或团队，如：运维组">
         </div>
         <div class="form-group" id="groupExistingWrap">
           <label>把已有通道加入该组（可选）</label>
@@ -652,7 +653,7 @@
       <form onsubmit="saveSettings(event)">
         <div class="form-group">
           <label>服务器控制地址 (地址:端口)</label>
-          <input type="text" id="settingServerAddr" required placeholder="例如 gw.example.com:33000">
+          <input type="text" id="settingServerAddr" required placeholder="地址:端口，如 gw.example.com:33000">
           <div class="input-hint">边缘网关的地址与控制端口。局域网、VPN、虚拟组网或公网地址均可，只要本机能连通</div>
         </div>
         <div class="form-group">
@@ -1076,13 +1077,18 @@
     }
 
     // 新建代理通道；groupId 非空时默认加入该通道组（通道组卡片上的「添加地址」）
+    // 组卡片「添加地址」打开时固定加入的通道组；新建时不需要选择通道组
+    let fixedGroupId = null;
+
     function openCreateModal(groupId) {
-      document.getElementById('modalTitle').innerText = '新建代理通道';
+      fixedGroupId = groupId || null;
+      const g = currentGroups.find(x => x.id === fixedGroupId);
+      document.getElementById('modalTitle').innerText = fixedGroupId ? `添加地址到「${g ? g.name : '通道组'}」` : '新建代理通道';
       document.getElementById('tunnelId').value = '';
       document.getElementById('tunnelName').value = '';
       document.getElementById('tunnelOwner').value = '';
       document.getElementById('tunnelTargetLabel').innerText = '目标服务（每行一台主机，多个端口用逗号隔开）';
-      fillTunnelGroupSelect(groupId || '');
+      fillTunnelGroupSelect('');
       setAccessForm([]);
       setLifecycleForm(30, 0, 0);
       resetPlan();
@@ -1094,6 +1100,7 @@
     function editTunnel(id) {
       const t = currentTunnels.find(item => item.id === id);
       if (!t) return;
+      fixedGroupId = null;
       document.getElementById('modalTitle').innerText = '编辑代理通道';
       document.getElementById('tunnelId').value = t.id;
       document.getElementById('tunnelName').value = t.name;
@@ -1172,8 +1179,8 @@
       const edit = isEditing();
       document.getElementById('targetRows').innerHTML = rows.map(r => `
         <div class="target-row">
-          <input type="text" class="t-host" value="${escapeHtml(r.host)}" placeholder="${edit ? '例如 10.0.0.10' : '例如 10.0.1.11，可粘贴多个'}" oninput="schedulePlan()" onpaste="onHostPaste(event)">
-          <input type="text" class="t-ports" value="${escapeHtml(r.ports)}" placeholder="${edit ? '3306' : '22, 3306'}" oninput="schedulePlan()">
+          <input type="text" class="t-host" value="${escapeHtml(r.host)}" placeholder="${edit ? 'IP 或域名' : 'IP 或域名，支持粘贴多行'}" oninput="schedulePlan()" onpaste="onHostPaste(event)">
+          <input type="text" class="t-ports" value="${escapeHtml(r.ports)}" placeholder="${edit ? '如 3306' : '如 22, 3306'}" oninput="schedulePlan()">
           ${edit ? '' : `<button type="button" class="icon-btn" onclick="removeTargetRow(this)" title="删除这一行" ${rows.length === 1 ? 'disabled' : ''}>⊖</button>`}
         </div>`).join('');
       document.getElementById('addRowBtn').style.display = edit ? 'none' : '';
@@ -1262,11 +1269,15 @@
 
     // 通道组选项：'' 不分组，'__new__' 新建，其余为已有组 ID
     function groupFields() {
+      const name = document.getElementById('tunnelName').value.trim();
+      if (!isEditing()) {
+        // 新建：「添加地址」固定加入该组；多个地址自动新建以名称命名的组；一个地址不分组
+        if (fixedGroupId) return { group_id: fixedGroupId, new_group: '' };
+        return { group_id: '', new_group: isBatch() ? name : '' };
+      }
       const sel = document.getElementById('tunnelGroup').value;
       if (sel !== '__new__') return { group_id: sel, new_group: '' };
-      const name = document.getElementById('tunnelName').value.trim();
-      const custom = isEditing() ? document.getElementById('tunnelNewGroup').value.trim() : '';
-      return { group_id: '', new_group: custom || name };
+      return { group_id: '', new_group: document.getElementById('tunnelNewGroup').value.trim() || name };
     }
 
     function tunnelPayload(port, whitelist) {
@@ -1312,16 +1323,11 @@
     function renderPlan() {
       const batch = isBatch(), edit = isEditing();
       document.getElementById('tunnelPortWrap').style.display = edit ? 'block' : 'none';
-      // 多个地址必须放进通道组；新建时只有一个地址就不需要新建组
-      const sel = document.getElementById('tunnelGroup');
-      const none = sel.querySelector('option[value=""]'), fresh = sel.querySelector('option[value="__new__"]');
-      if (none) none.disabled = none.hidden = batch;
-      if (fresh) fresh.disabled = fresh.hidden = !batch && !edit;
-      if (batch && sel.value === '') sel.value = '__new__';
-      if (!batch && !edit && sel.value === '__new__') sel.value = '';
+      document.getElementById('tunnelGroupWrap').style.display = edit ? 'block' : 'none';
       updateGroupHint();
-      document.getElementById('tunnelSaveBtn').innerText = batch ? `创建 ${tunnelPlan.length} 个通道` : '保存通道';
-      document.getElementById('tunnelNameLabel').innerText = batch && sel.value === '__new__' ? '通道组名称' : '通道名称 / 备注';
+      const n = tunnelPlan.length;
+      document.getElementById('tunnelSaveBtn').innerText = fixedGroupId ? (batch ? `添加 ${n} 个地址` : '添加')
+        : (batch ? `创建 ${n} 个通道` : '保存通道');
 
       const box = document.getElementById('tunnelPlan');
       if (tunnelPlanError) {
@@ -1358,22 +1364,29 @@
     }
 
     function updateGroupHint() {
-      const sel = document.getElementById('tunnelGroup').value;
       const name = document.getElementById('tunnelName').value.trim();
-      const newInput = document.getElementById('tunnelNewGroup');
-      newInput.style.display = sel === '__new__' && isEditing() ? 'block' : 'none';
-      newInput.placeholder = name ? `组名，默认「${name}」` : '通道组名称';
-      let hint = '';
-      if (sel === '__new__' && isBatch()) {
-        hint = `${tunnelPlan.length} 个地址会放进通道组${name ? `「${name}」` : '（填写上面的名称）'}：共用邀请和授权，同事授权一次即可访问全部地址`;
-      } else if (sel) {
-        hint = '组内通道共用邀请和授权，同事授权一次即可访问组内全部地址';
+      const nameInput = document.getElementById('tunnelName');
+      const label = document.getElementById('tunnelNameLabel');
+      if (!isEditing()) {
+        // 新建：不需要选择通道组，只说明结果
+        const g = fixedGroupId ? ((currentGroups.find(x => x.id === fixedGroupId) || {}).name || '通道组') : null;
+        let hint = '';
+        if (g) hint = `新地址加入通道组「${g}」，自动沿用组的邀请和授权，已授权的同事无需重新授权`;
+        else if (isBatch()) hint = `${tunnelPlan.length} 个地址将放进通道组${name ? `「${name}」` : '（以上面填写的名称命名）'}：共用邀请和授权，同事授权一次即可访问全部地址`;
+        document.getElementById('tunnelAddHint').innerText = hint;
+        label.innerText = g ? '通道名称（可选）' : (isBatch() ? '通道组名称' : '通道名称');
+        nameInput.placeholder = g ? `留空则命名为「${g} (主机)」` : (isBatch() ? '如：订单服务集群' : '如：订单数据库');
+        return;
       }
-      document.getElementById('tunnelGroupHint').innerText = hint;
-      // 加入已有组时名称可以不填，按组名命名
-      const g = (currentGroups.find(x => x.id === sel) || {}).name;
-      document.getElementById('tunnelName').placeholder = !isEditing() && g ? `可不填，默认「${g} (主机)」`
-        : (isBatch() ? '例如：订单服务' : '例如：MySQL 实习库 或 财务系统 SSH');
+      document.getElementById('tunnelAddHint').innerText = '';
+      label.innerText = '通道名称';
+      nameInput.placeholder = '如：订单数据库';
+      const sel = document.getElementById('tunnelGroup').value;
+      const newInput = document.getElementById('tunnelNewGroup');
+      newInput.style.display = sel === '__new__' ? 'block' : 'none';
+      newInput.placeholder = name ? `通道组名称，留空则用「${name}」` : '通道组名称';
+      document.getElementById('tunnelGroupHint').innerText = sel === '__new__' ? '新建通道组并移入；之后可在组卡片的「编辑」里把其它通道加入'
+        : (sel ? '组内通道共用邀请和授权，同事授权一次即可访问组内全部地址' : '');
     }
 
     function onTunnelGroupChange() {
@@ -1414,7 +1427,8 @@
       const id = document.getElementById('tunnelId').value;
       const batch = isBatch();
       const sel = document.getElementById('tunnelGroup').value;
-      const joinsExisting = sel !== '' && sel !== '__new__';
+      // 加入已有组时组的授权自动覆盖新地址，不需要再发邀请
+      const joinsExisting = !id && !!fixedGroupId;
       const name = document.getElementById('tunnelName').value.trim();
       const target = composeTarget(readTargetRows());
       let port = 0;
@@ -1428,7 +1442,7 @@
         if (!tunnelPlan.length) { alert('请填写目标主机和端口'); return; }
       }
       if (!name && (id || !joinsExisting)) { alert(batch ? '请填写通道组名称' : '请填写通道名称'); return; }
-      if (sel === '__new__' && !groupFields().new_group) { alert('请填写通道组名称'); return; }
+      if (id && sel === '__new__' && !groupFields().new_group) { alert('请填写通道组名称'); return; }
       const mode = document.getElementById('tunnelAccessMode').value;
       let whitelist = [];
       if (mode === 'all') whitelist = ['*'];

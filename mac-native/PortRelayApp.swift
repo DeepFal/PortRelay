@@ -3773,6 +3773,8 @@ struct TargetRow: Identifiable, Equatable {
 struct TunnelEditSheet: View {
     @ObservedObject var vm: PortRelayViewModel
     let tunnel: TunnelItem?
+    /// 组卡片「添加地址」打开时固定加入的通道组
+    let fixedGroupId: String?
     @Binding var isPresented: Bool
 
     @State private var name: String
@@ -3803,7 +3805,8 @@ struct TunnelEditSheet: View {
         case linkOnly, specific, all
     }
 
-    /// 通道组选项。新建时多个地址自动新建组（以名称为组名）；编辑时可以新建组并移入
+    /// 通道组。新建时不用选：一个地址不分组，多个地址自动新建组（以名称为组名），
+    /// 从组卡片「添加地址」进来则固定加入该组；只有编辑已有通道时才能选择移入、新建或移出
     enum GroupChoice: Hashable {
         case none
         case new
@@ -3813,11 +3816,12 @@ struct TunnelEditSheet: View {
     var isEdit: Bool { tunnel != nil }
 
     /// 表单字段在创建时就用通道数据填好，不依赖 onAppear（避免第一帧显示空表单）。
-    /// groupId：新建时默认加入的通道组（通道组卡片上的「添加地址」）
+    /// groupId：新建时固定加入的通道组（通道组卡片上的「添加地址」）
     init(vm: PortRelayViewModel, tunnel: TunnelItem?, isPresented: Binding<Bool>, groupId: String? = nil,
          draftName: String = "", draftRows: [(String, String)] = [], onCreated: ((AccessScope) -> Void)? = nil) {
         _vm = ObservedObject(wrappedValue: vm)
         self.tunnel = tunnel
+        self.fixedGroupId = tunnel == nil ? groupId : nil
         self.onCreated = onCreated
         _isPresented = isPresented
         let wl = tunnel?.whitelist ?? []
@@ -3837,7 +3841,7 @@ struct TunnelEditSheet: View {
         _idleCloseMinutes = State(initialValue: tunnel?.effective_idle_close_minutes ?? 30)
         _maxBandwidthMB = State(initialValue: tunnel?.max_bandwidth_mb ?? 0)
         _whitelistString = State(initialValue: mode == .specific ? wl.joined(separator: ", ") : "")
-        let gid = tunnel?.group_id ?? groupId ?? ""
+        let gid = tunnel?.group_id ?? ""
         _groupChoice = State(initialValue: gid.isEmpty ? .none : .existing(gid))
     }
 
@@ -3856,20 +3860,26 @@ struct TunnelEditSheet: View {
         return isEdit && !n.isEmpty ? n : trimmedName
     }
 
-    var existingGroupName: String? {
-        if case .existing(let id) = groupChoice { return vm.group(id)?.name }
-        return nil
+    /// 实际生效的通道组：编辑时按选择；新建时由入口和地址数决定
+    var effectiveChoice: GroupChoice {
+        if isEdit { return groupChoice }
+        if let gid = fixedGroupId { return .existing(gid) }
+        return isBatch ? .new : .none
+    }
+
+    /// 「添加地址」固定加入的通道组名称
+    var fixedGroupName: String? {
+        fixedGroupId.map { vm.group($0)?.name ?? "通道组" }
     }
 
     var nameTitle: String {
-        isBatch && groupChoice == .new ? "通道组名称" : "通道名称"
+        if fixedGroupName != nil { return "通道名称（可选）" }
+        return isBatch ? "通道组名称" : "通道名称"
     }
 
     var namePlaceholder: String {
-        if !isEdit, let g = existingGroupName {
-            return "可不填，默认「\(g) (主机)」"
-        }
-        return isBatch ? "例如：订单服务" : "例如：MySQL 实习库"
+        if let g = fixedGroupName { return "留空则命名为「\(g) (主机)」" }
+        return isBatch ? "如：订单服务集群" : "如：订单数据库"
     }
 
     var canSave: Bool {
@@ -3878,12 +3888,18 @@ struct TunnelEditSheet: View {
             return !trimmedName.isEmpty && !composedTarget.isEmpty && (groupChoice != .new || !resolvedGroupName.isEmpty)
         }
         if plan.isEmpty || planError != nil { return false }
-        return !trimmedName.isEmpty || existingGroupName != nil
+        return !trimmedName.isEmpty || fixedGroupId != nil
+    }
+
+    var saveTitle: String {
+        if isSaving { return "保存中…" }
+        if fixedGroupId != nil { return isBatch ? "添加 \(plan.count) 个地址" : "添加" }
+        return isBatch ? "创建 \(plan.count) 个通道" : "保存"
     }
 
     func makeForm(port: Int, whitelist: [String]) -> TunnelForm {
         var groupId = "", newGroup = ""
-        switch groupChoice {
+        switch effectiveChoice {
         case .none: break
         case .new: newGroup = resolvedGroupName
         case .existing(let id): groupId = id
@@ -3899,8 +3915,9 @@ struct TunnelEditSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(isEdit ? "编辑通道" : "添加通道")
+            Text(verbatim: isEdit ? "编辑通道" : (fixedGroupName.map { "添加地址到「\($0)」" } ?? "添加通道"))
                 .font(.system(size: 15, weight: .bold))
+                .lineLimit(1)
 
             HStack(spacing: 12) {
                 field(nameTitle) {
@@ -3908,7 +3925,7 @@ struct TunnelEditSheet: View {
                         .textFieldStyle(.roundedBorder)
                 }
                 field("关联责任人") {
-                    TextField("例如：张三 / 数据组", text: $owner)
+                    TextField("负责人或团队，如：数据组", text: $owner)
                         .textFieldStyle(.roundedBorder)
                 }
             }
@@ -3928,7 +3945,9 @@ struct TunnelEditSheet: View {
                 }
             }
 
-            groupSection
+            if isEdit {
+                groupSection
+            }
             closeSection
             bandwidthSection
             accessSection
@@ -3943,7 +3962,7 @@ struct TunnelEditSheet: View {
                 Spacer()
                 Button("取消") { isPresented = false }
                     .controlSize(.small)
-                Button(isSaving ? "保存中…" : (isBatch ? "创建 \(plan.count) 个通道" : "保存")) { save() }
+                Button(saveTitle) { save() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(!canSave)
@@ -3952,13 +3971,8 @@ struct TunnelEditSheet: View {
         }
         .padding(20)
         .frame(width: 520)
-        .task(id: "\(composedTarget)|\(trimmedName)|\(groupChoice)") { await refreshPlan() }
+        .task(id: "\(composedTarget)|\(trimmedName)") { await refreshPlan() }
         .onChange(of: composedTarget) { _ in probes = [:] }
-        .onChange(of: isBatch) { batch in
-            // 多个地址放进同一个通道组；只剩一个地址时回到不分组
-            if batch && groupChoice == .none { groupChoice = .new }
-            if !batch && !isEdit && groupChoice == .new { groupChoice = .none }
-        }
     }
 
     // MARK: Target list
@@ -3994,7 +4008,7 @@ struct TunnelEditSheet: View {
                             .font(.system(size: 12))
                     }
                     .buttonStyle(.borderless)
-                    .help("可以一次粘贴多个 IP（每行一个，或用逗号分隔），会自动拆成多行")
+                    .help("也可以直接粘贴多个地址（每行一个或逗号分隔，可带 :端口），会自动拆成多行")
                     Spacer()
                     probeButton
                 }
@@ -4012,6 +4026,11 @@ struct TunnelEditSheet: View {
             } else if !plan.isEmpty {
                 planList
             }
+            if !isEdit, let hint = addGroupHint {
+                Label(hint, systemImage: "square.stack.3d.up")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
@@ -4023,10 +4042,10 @@ struct TunnelEditSheet: View {
 
     func targetRow(_ row: TargetRow) -> some View {
         HStack(spacing: 8) {
-            TextField(isEdit ? "例如 10.0.0.10" : "例如 10.0.1.11，可粘贴多个", text: hostBinding(row.id))
+            TextField(isEdit ? "IP 或域名" : "IP 或域名，支持粘贴多行", text: hostBinding(row.id))
                 .textFieldStyle(.roundedBorder)
                 .focused($focusedRow, equals: row.id)
-            TextField(isEdit ? "3306" : "22, 3306", text: portsBinding(row.id))
+            TextField(isEdit ? "如 3306" : "如 22, 3306", text: portsBinding(row.id))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 150)
             if !isEdit {
@@ -4137,6 +4156,14 @@ struct TunnelEditSheet: View {
 
     // MARK: Sections
 
+    /// 新建时的通道组说明（不需要选择）
+    var addGroupHint: String? {
+        if let g = fixedGroupName { return "新地址加入通道组「\(g)」，自动沿用组的邀请和授权，已授权的同事无需重新授权" }
+        guard isBatch else { return nil }
+        let n = trimmedName.isEmpty ? "（以上面填写的名称命名）" : "「\(trimmedName)」"
+        return "\(plan.count) 个地址将放进通道组\(n)：共用邀请和授权，同事授权一次即可访问全部地址"
+    }
+
     var groupSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("通道组")
@@ -4144,12 +4171,8 @@ struct TunnelEditSheet: View {
                 .foregroundColor(.secondary)
             HStack(spacing: 8) {
                 Picker("", selection: $groupChoice) {
-                    if !isBatch {
-                        Text("不分组").tag(GroupChoice.none)
-                    }
-                    if isBatch || isEdit {
-                        Text("新建通道组").tag(GroupChoice.new)
-                    }
+                    Text("不分组").tag(GroupChoice.none)
+                    Text("新建通道组").tag(GroupChoice.new)
                     if !vm.groups.isEmpty {
                         Divider()
                         ForEach(vm.groups) { g in
@@ -4159,8 +4182,8 @@ struct TunnelEditSheet: View {
                 }
                 .labelsHidden()
                 .fixedSize()
-                if isEdit && groupChoice == .new {
-                    TextField(trimmedName.isEmpty ? "通道组名称" : "组名，默认「\(trimmedName)」", text: $newGroupName)
+                if groupChoice == .new {
+                    TextField(trimmedName.isEmpty ? "通道组名称" : "通道组名称，留空则用「\(trimmedName)」", text: $newGroupName)
                         .textFieldStyle(.roundedBorder)
                 }
             }
@@ -4174,13 +4197,9 @@ struct TunnelEditSheet: View {
 
     var groupHint: String? {
         switch groupChoice {
-        case .none:
-            return nil
-        case .new where isBatch:
-            let n = trimmedName.isEmpty ? "（填写上面的名称）" : "「\(trimmedName)」"
-            return "\(plan.count) 个地址会放进通道组\(n)：共用邀请和授权，同事授权一次即可访问全部地址"
-        default:
-            return "组内通道共用邀请和授权，同事授权一次即可访问组内全部地址"
+        case .none: return nil
+        case .new: return "新建通道组并移入；之后可在组卡片的「编辑」里把其它通道加入"
+        case .existing: return "组内通道共用邀请和授权，同事授权一次即可访问组内全部地址"
         }
     }
 
@@ -4244,7 +4263,7 @@ struct TunnelEditSheet: View {
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             case .specific:
-                TextField("例如 192.168.1.100, 192.168.1.0/24（逗号分隔）", text: $whitelistString)
+                TextField("IP 或 CIDR 网段，逗号分隔，如 192.168.1.100, 10.0.0.0/24", text: $whitelistString)
                     .textFieldStyle(.roundedBorder)
                 Text("名单内的设备始终可以访问；其他人仍可通过邀请链接临时授权。")
                     .font(.system(size: 11))
@@ -4328,7 +4347,8 @@ struct TunnelEditSheet: View {
         }
         guard let wl = whitelist() else { return }
         let form = makeForm(port: port, whitelist: wl)
-        let joinsExisting = existingGroupName != nil
+        // 加入已有组时组的授权自动覆盖新地址，不需要再发邀请
+        let joinsExisting = fixedGroupId != nil
         isSaving = true
         errorMessage = nil
         Task {
@@ -4402,14 +4422,14 @@ struct GroupEditSheet: View {
                     Text("通道组名称")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    TextField("例如：订单服务集群", text: $name)
+                    TextField("如：订单服务集群", text: $name)
                         .textFieldStyle(.roundedBorder)
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("关联责任人")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    TextField("例如：张三 / 运维组", text: $owner)
+                    TextField("负责人或团队，如：运维组", text: $owner)
                         .textFieldStyle(.roundedBorder)
                 }
             }
@@ -4612,7 +4632,7 @@ struct InviteSheet: View {
                         Text("备注（发给谁，可选）")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
-                        TextField("例如：张三", text: $note)
+                        TextField("如：张三", text: $note)
                             .textFieldStyle(.roundedBorder)
                     }
                     HStack(spacing: 6) {
@@ -4741,7 +4761,7 @@ struct SettingsSheet: View {
                 Text("服务器控制地址 (地址:端口)")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
-                TextField("例如 gw.example.com:33000", text: $serverAddr)
+                TextField("地址:端口，如 gw.example.com:33000", text: $serverAddr)
                     .textFieldStyle(.roundedBorder)
             }
 
