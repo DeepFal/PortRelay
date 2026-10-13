@@ -778,8 +778,14 @@ class PortRelayViewModel: ObservableObject {
 
     /// 所有待审批申请（单个通道的与通道组的）
     var pendingRequests: [(title: String, scope: AccessScope, request: AccessRequestItem)] {
-        tunnels.flatMap { t in (t.metrics?.pending ?? []).map { (t.name, AccessScope.tunnel(t.id), $0) } }
-            + groups.flatMap { g in (g.metrics?.pending ?? []).map { (g.name, AccessScope.group(g.id), $0) } }
+        var out: [(title: String, scope: AccessScope, request: AccessRequestItem)] = []
+        for t in tunnels {
+            for r in t.metrics?.pending ?? [] { out.append((title: t.name, scope: .tunnel(t.id), request: r)) }
+        }
+        for g in groups {
+            for r in g.metrics?.pending ?? [] { out.append((title: g.name, scope: .group(g.id), request: r)) }
+        }
+        return out
     }
 
     // MARK: 通道组与授权范围
@@ -1002,9 +1008,11 @@ class PortRelayViewModel: ObservableObject {
 
     /// 菜单内容有变化时才需要重建（避免每秒重建打断已展开的菜单）
     func menuNeedsRebuild() -> Bool {
-        let sig = "\(isConnected)|" + tunnels.map { "\($0.id):\($0.name):\($0.listen_port):\($0.enabled)" }.joined(separator: ",")
-            + "|" + groups.map { "\($0.id):\($0.name)" }.joined(separator: ",")
-            + "|" + pendingRequests.map { $0.request.id }.joined(separator: ",")
+        // 分步拼接：一长串字符串相加会让旧版编译器类型推断超时
+        let tunnelSig: String = tunnels.map { "\($0.id):\($0.name):\($0.listen_port):\($0.enabled)" }.joined(separator: ",")
+        let groupSig: String = groups.map { "\($0.id):\($0.name)" }.joined(separator: ",")
+        let pendingSig: String = pendingRequests.map { $0.request.id }.joined(separator: ",")
+        let sig = [String(isConnected), tunnelSig, groupSig, pendingSig].joined(separator: "|")
         if sig == lastMenuSignature { return false }
         lastMenuSignature = sig
         return true
@@ -1315,10 +1323,20 @@ class PortRelayViewModel: ObservableObject {
             let host = publicHost.isEmpty ? "192.168.1.10" : publicHost
             let deadline = Date().addingTimeInterval(Double(validMinutes) * 60)
             let fmt = DateFormatter(); fmt.dateFormat = "MM-dd HH:mm"
-            let what = scope.isGroup
-                ? "通道组：\(scopeTitle(scope))（\(ts.count) 个地址）\n访问地址：" + ts.map { "\n  \(host):\($0.listen_port) → \($0.target)" }.joined()
-                : "通道：\(ts.first?.name ?? "MySQL 数据库")\n访问地址：\(host):\(ts.first?.listen_port ?? 33660)"
-            let text = "【PortRelay 访问邀请】" + (note.isEmpty ? "" : "（给 \(note)）") + "\n" + what + "\n请在 \(fmt.string(from: deadline)) 前用浏览器打开下面的链接，" + (requireApproval ? "填写姓名提交申请，管理员批准后即可访问" : "填写姓名后即可访问") + "（访问有效期：\(leaseDurationTitle(leaseDuration))）：\n\(link)\n此链接仅限 1 台设备使用，请勿转发。"
+            var lines: [String] = ["【PortRelay 访问邀请】" + (note.isEmpty ? "" : "（给 \(note)）")]
+            if scope.isGroup {
+                lines.append("通道组：\(scopeTitle(scope))（\(ts.count) 个地址）")
+                lines.append("访问地址：")
+                for t in ts { lines.append("  \(host):\(t.listen_port) → \(t.target)") }
+            } else {
+                lines.append("通道：\(ts.first?.name ?? "MySQL 数据库")")
+                lines.append("访问地址：\(host):\(ts.first?.listen_port ?? 33660)")
+            }
+            let action = requireApproval ? "填写姓名提交申请，管理员批准后即可访问" : "填写姓名后即可访问"
+            lines.append("请在 \(fmt.string(from: deadline)) 前用浏览器打开下面的链接，\(action)（访问有效期：\(leaseDurationTitle(leaseDuration))）：")
+            lines.append(link)
+            lines.append("此链接仅限 1 台设备使用，请勿转发。")
+            let text = lines.joined(separator: "\n")
             return (InviteShareResp(invite: InviteItem(code: "k7m2xq9fpa", note: note, created_at: "", expires_at: "", max_uses: maxUses, lease_duration: leaseDuration, require_approval: requireApproval, uses: nil), link: link, share_text: text), nil)
         }
         let (data, err) = await apiCall("POST", "\(scope.apiPath)/invites",
