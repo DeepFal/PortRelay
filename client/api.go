@@ -209,6 +209,10 @@ func (s *APIServer) handleTunnelItem(w http.ResponseWriter, r *http.Request) {
 	}
 	tunnelID := parts[2]
 
+	if tunnelID == "batch" && len(parts) == 3 && r.Method == http.MethodPost {
+		s.handleTunnelBatch(w, r)
+		return
+	}
 	if len(parts) == 4 && parts[3] == "toggle" && r.Method == http.MethodPost {
 		s.handleToggle(w, r, tunnelID)
 		return

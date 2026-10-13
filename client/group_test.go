@@ -26,6 +26,8 @@ func TestExpandTargets(t *testing.T) {
 		{"10.0.1.1，10.0.1.2、10.0.1.1", "22", []string{"10.0.1.1:22", "10.0.1.2:22"}},
 		{"fd00::1", "22", []string{"[fd00::1]:22"}},
 		{"10.0.2.9:5432", "", []string{"10.0.2.9:5432"}},
+		{"10.0.1.11-13:22", "", []string{"10.0.1.11:22", "10.0.1.12:22", "10.0.1.13:22"}},
+		{"10.0.1.11:8080-8081, db_1.internal:3306", "", []string{"10.0.1.11:8080", "10.0.1.11:8081", "db_1.internal:3306"}},
 	}
 	for _, c := range cases {
 		got, err := ExpandTargets(c.hosts, c.ports)
@@ -42,6 +44,9 @@ func TestExpandTargets(t *testing.T) {
 		{"10.0.1.11", "0"},
 		{"10.0.1.11", "70000"},
 		{"10.0.1.1-40", "22, 23"},
+		{"10.0.1.11-13", ""},
+		{"10.0.1.11-300:22", ""},
+		{"10.0.1.11:0", ""},
 	} {
 		if got, err := ExpandTargets(bad[0], bad[1]); err == nil {
 			t.Errorf("ExpandTargets(%q, %q) should fail, got %v", bad[0], bad[1], got)
@@ -77,9 +82,25 @@ func TestAllocatePortsPrefersContiguousBlock(t *testing.T) {
 	}
 }
 
-type groupResp struct {
-	Group   TunnelGroup             `json:"group"`
-	Created []protocol.TunnelConfig `json:"created"`
+type batchResp struct {
+	Group   *TunnelGroup            `json:"group"`
+	Tunnels []protocol.TunnelConfig `json:"tunnels"`
+}
+
+// addTunnels submits the add-tunnel form
+func (e *env) addTunnels(t *testing.T, body map[string]any) batchResp {
+	t.Helper()
+	status, raw := e.call(t, "POST", "/api/tunnels/batch", body)
+	want := http.StatusCreated
+	if body["dry_run"] == true {
+		want = http.StatusOK
+	}
+	if status != want {
+		t.Fatalf("add tunnels %v: %d %s", body, status, raw)
+	}
+	var out batchResp
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
 func (e *env) group(t *testing.T, id string) GroupView {
@@ -113,19 +134,24 @@ func TestGroupEndToEnd(t *testing.T) {
 	waitFor(t, "agent connected", e.agent.IsConnected)
 	echo1, echo2 := startEcho(t), startEcho(t)
 
-	status, body := e.call(t, "POST", "/api/groups", map[string]any{"name": "订单服务", "owner": "运维组", "hosts": echo1 + ", " + echo2})
-	if status != http.StatusCreated {
-		t.Fatalf("create group: %d %s", status, body)
+	g := e.addTunnels(t, map[string]any{
+		"name": "订单服务", "owner": "运维组", "target": echo1 + ", " + echo2, "new_group": "订单服务",
+		"whitelist": []string{}, "idle_close_minutes": 60, "duration_minutes": 480, "max_bandwidth_mb": 5,
+	})
+	if g.Group == nil || g.Group.Name != "订单服务" || g.Group.Owner != "运维组" {
+		t.Fatalf("new group: %+v", g.Group)
 	}
-	var g groupResp
-	_ = json.Unmarshal(body, &g)
-	if len(g.Created) != 2 || g.Created[1].ListenPort != g.Created[0].ListenPort+1 {
-		t.Fatalf("members should get a contiguous port block: %+v", g.Created)
+	if len(g.Tunnels) != 2 || g.Tunnels[1].ListenPort != g.Tunnels[0].ListenPort+1 {
+		t.Fatalf("members should get a contiguous port block: %+v", g.Tunnels)
 	}
-	m1, m2 := g.Created[0], g.Created[1]
-	for _, m := range g.Created {
+	m1, m2 := g.Tunnels[0], g.Tunnels[1]
+	for _, m := range g.Tunnels {
 		if m.GroupID != g.Group.ID || m.Owner != "运维组" || len(m.Whitelist) != 0 || !strings.HasPrefix(m.Name, "订单服务 (") {
 			t.Fatalf("member not set up as a link-only group member: %+v", m)
+		}
+		// 表单里的每一项设置都用于每个成员
+		if *m.IdleCloseMinutes != 60 || m.DurationMinutes != 480 || m.MaxBandwidthMB != 5 || m.ExpiresAt == nil {
+			t.Fatalf("member lost form settings: %+v", m)
 		}
 	}
 	waitFor(t, "members online", func() bool {
@@ -135,7 +161,7 @@ func TestGroupEndToEnd(t *testing.T) {
 		t.Fatal("group members are link-only by default")
 	}
 
-	status, body = e.call(t, "POST", "/api/groups/"+g.Group.ID+"/invites", map[string]any{"note": "小王", "lease_duration": "8h"})
+	status, body := e.call(t, "POST", "/api/groups/"+g.Group.ID+"/invites", map[string]any{"note": "小王", "lease_duration": "8h"})
 	if status != http.StatusCreated {
 		t.Fatalf("group invite: %d %s", status, body)
 	}
@@ -155,7 +181,7 @@ func TestGroupEndToEnd(t *testing.T) {
 	}
 
 	grantViaInvite(t, e, inv.Invite.Code, "小王")
-	for _, m := range g.Created {
+	for _, m := range g.Tunnels {
 		if got, err := echoVia(m.ListenPort, "hi"); err != nil || got != "hi" {
 			t.Fatalf("member %d not reachable after group grant: %q %v", m.ListenPort, got, err)
 		}
@@ -213,7 +239,7 @@ func TestGroupFromExistingTunnelsRenameAndMoveOut(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("group from existing tunnels: %d %s", status, body)
 	}
-	var g groupResp
+	var g batchResp
 	_ = json.Unmarshal(body, &g)
 	if e.tunnel(t, ids[0]).GroupID != g.Group.ID || e.tunnel(t, ids[1]).GroupID != g.Group.ID {
 		t.Fatal("existing tunnels should join the group")
@@ -271,38 +297,58 @@ func TestGroupFromExistingTunnelsRenameAndMoveOut(t *testing.T) {
 	}
 }
 
-func TestGroupPreviewDoesNotSave(t *testing.T) {
+func TestAddTunnelFormPreviewAndRules(t *testing.T) {
 	e := startEnv(t, testToken)
-	status, body := e.call(t, "POST", "/api/groups/preview", map[string]any{"name": "订单服务", "hosts": "10.0.1.11-12", "ports": "22"})
-	if status != http.StatusOK {
-		t.Fatalf("preview: %d %s", status, body)
-	}
-	var out struct {
-		Members []struct {
-			Name       string `json:"name"`
-			Target     string `json:"target"`
-			ListenPort int    `json:"listen_port"`
-		} `json:"members"`
-	}
-	_ = json.Unmarshal(body, &out)
-	if len(out.Members) != 2 || out.Members[0].Name != "订单服务 (10.0.1.11)" || out.Members[1].ListenPort != out.Members[0].ListenPort+1 {
-		t.Fatalf("preview: %+v", out.Members)
+
+	// 预览：不保存，展开目标并预分配连续端口
+	pv := e.addTunnels(t, map[string]any{"target": "10.0.1.11-12:22", "dry_run": true})
+	if len(pv.Tunnels) != 2 || pv.Tunnels[0].Target != "10.0.1.11:22" || pv.Tunnels[1].ListenPort != pv.Tunnels[0].ListenPort+1 {
+		t.Fatalf("preview: %+v", pv.Tunnels)
 	}
 	if len(e.cm.Get().Tunnels) != 0 {
 		t.Fatal("preview must not create tunnels")
 	}
-	if status, _ := e.call(t, "POST", "/api/groups/preview", map[string]any{"hosts": "10.0.1.11"}); status != http.StatusBadRequest {
-		t.Fatal("missing ports should be rejected")
+
+	// 多个目标必须放进通道组
+	if status, _ := e.call(t, "POST", "/api/tunnels/batch", map[string]any{"name": "x", "target": "10.0.1.11-12:22"}); status != http.StatusBadRequest {
+		t.Fatal("several targets without a group must be rejected")
+	}
+
+	// 单个目标：名称和端口按填写的来，不分组
+	port := freeRelayPort(t)
+	one := e.addTunnels(t, map[string]any{"name": "MySQL", "target": "10.0.2.9:3306", "listen_port": port})
+	if one.Group != nil || len(one.Tunnels) != 1 || one.Tunnels[0].Name != "MySQL" || one.Tunnels[0].ListenPort != port {
+		t.Fatalf("single tunnel: %+v", one)
+	}
+
+	// 加入已有组且不填名称：按组名命名
+	grp := e.addTunnels(t, map[string]any{"name": "订单服务", "target": "10.0.1.11:22", "new_group": "订单服务"})
+	if grp.Tunnels[0].Name != "订单服务" {
+		t.Fatalf("a named single tunnel keeps its name: %+v", grp.Tunnels[0])
+	}
+	more := e.addTunnels(t, map[string]any{"target": "10.0.1.12-13:22", "group_id": grp.Group.ID})
+	if more.Group.ID != grp.Group.ID || more.Tunnels[0].Name != "订单服务 (10.0.1.12)" || more.Tunnels[0].GroupID != grp.Group.ID {
+		t.Fatalf("members added to an existing group: %+v", more)
+	}
+	if status, _ := e.call(t, "POST", "/api/tunnels/batch", map[string]any{"name": "y", "target": "10.0.3.1:22", "new_group": "订单服务"}); status != http.StatusBadRequest {
+		t.Fatal("duplicate group names must be rejected")
+	}
+
+	// 编辑通道时新建通道组
+	status, body := e.call(t, "PUT", "/api/tunnels/"+one.Tunnels[0].ID, map[string]any{"new_group": "数据库"})
+	var moved protocol.TunnelConfig
+	_ = json.Unmarshal(body, &moved)
+	groups := e.cm.Get().Groups
+	if status != http.StatusOK || len(groups) != 2 || groups[1].Name != "数据库" || moved.GroupID != groups[1].ID {
+		t.Fatalf("edit into a new group: %d %s %+v", status, body, groups)
 	}
 }
 
 func TestGroupIdleCloseIsLinked(t *testing.T) {
 	e := startEnvWith(t, testToken, func(a *Agent) { a.idleUnit = 3 * time.Second })
 	waitFor(t, "agent connected", e.agent.IsConnected)
-	_, body := e.call(t, "POST", "/api/groups", map[string]any{"name": "g", "hosts": "127.0.0.1", "ports": "1, 2", "idle_close_minutes": 1})
-	var g groupResp
-	_ = json.Unmarshal(body, &g)
-	a, b := g.Created[0], g.Created[1]
+	g := e.addTunnels(t, map[string]any{"name": "g", "target": "127.0.0.1:1, 127.0.0.1:2", "new_group": "g", "idle_close_minutes": 1})
+	a, b := g.Tunnels[0], g.Tunnels[1]
 	waitFor(t, "members online", func() bool {
 		return e.tunnel(t, a.ID).Metrics.Status == "online" && e.tunnel(t, b.ID).Metrics.Status == "online"
 	})

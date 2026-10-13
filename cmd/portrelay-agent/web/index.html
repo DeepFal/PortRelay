@@ -327,6 +327,10 @@
     .check-item input { width: auto !important; }
     .check-item code { color: var(--text-muted); font-size: 12px; }
     .preview-row { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+    .plan-box { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: rgba(148, 163, 184, 0.08); color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+    .plan-box .route-endpoint { color: var(--accent, #38bdf8); }
+    .add-member { background: none; border: 0; color: var(--text-muted); font-size: 12px; cursor: pointer; padding: 8px 0; }
+    .add-member:hover { color: var(--text); }
     @media (max-width: 860px) { .member-name, .member-meta { display: none; } }
     .drawer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
     .drawer-content { flex: 1; overflow-y: auto; }
@@ -348,7 +352,6 @@
           <div id="statusDot" class="status-dot"></div>
           <span id="statusText">正在连接服务器...</span>
         </div>
-        <button class="btn-secondary" onclick="openGroupModal()" title="一次添加多个主机 / 端口，共用一条邀请链接">▤ 新建通道组</button>
         <button class="btn-primary" onclick="openCreateModal()">+ 新建代理通道</button>
         <button class="btn-secondary" onclick="openSettingsModal()">⚙️ 设置</button>
       </div>
@@ -437,28 +440,39 @@
       </div>
       <form id="tunnelForm" onsubmit="saveTunnel(event)">
         <input type="hidden" id="tunnelId">
-        <div class="form-group">
-          <label>通道名称 / 备注</label>
-          <input type="text" id="tunnelName" required placeholder="例如：MySQL 实习库 或 财务系统 SSH">
+        <div class="input-row">
+          <div class="form-group" style="flex: 1;">
+            <label>通道名称 / 备注</label>
+            <input type="text" id="tunnelName" placeholder="例如：MySQL 实习库 或 财务系统 SSH" oninput="schedulePlan()">
+          </div>
+          <div class="form-group" style="flex: 1;">
+            <label>责任人（可选）</label>
+            <input type="text" id="tunnelOwner" placeholder="例如：张三 / 数据组">
+          </div>
         </div>
-        <div class="form-group" id="tunnelGroupWrap" style="display:none;">
-          <label>所属通道组</label>
-          <select id="tunnelGroup"></select>
-        </div>
         <div class="form-group">
-          <label>目标地址 (中转机 Mac 可直连的内网目标)</label>
+          <label id="tunnelTargetLabel">目标地址（中转机 Mac 可直连的内网目标，可填多个）</label>
           <div class="input-row">
-            <input type="text" id="tunnelTarget" required placeholder="例如：10.0.0.10:3306">
+            <input type="text" id="tunnelTarget" required placeholder="例如：10.0.0.10:3306；多台主机写 10.0.1.11-13:22" oninput="schedulePlan()">
             <button type="button" class="btn-secondary" onclick="probeTarget()">探测测试</button>
           </div>
           <div class="input-hint" id="probeResult"></div>
+          <div class="plan-box" id="tunnelPlan" style="display:none;"></div>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="tunnelPortWrap">
           <label>对外监听端口 (范围: 33001 - 34000)</label>
           <div class="input-row">
-            <input type="number" id="tunnelPort" required min="33001" max="34000" placeholder="33660">
+            <input type="number" id="tunnelPort" min="33001" max="34000" placeholder="33660">
             <button type="button" class="btn-secondary" onclick="autoRecommendPort()">推荐空闲端口</button>
           </div>
+        </div>
+        <div class="form-group">
+          <label>通道组</label>
+          <div class="input-row">
+            <select id="tunnelGroup" onchange="onTunnelGroupChange()"></select>
+            <input type="text" id="tunnelNewGroup" style="display:none;" placeholder="通道组名称" oninput="onTunnelGroupChange()">
+          </div>
+          <div class="input-hint" id="tunnelGroupHint"></div>
         </div>
         <div class="form-group">
           <label>闲置自动关闭（没有连接、有效授权、待审批和可用邀请时开始计时）</label>
@@ -481,6 +495,16 @@
           </select>
         </div>
         <div class="form-group">
+          <label>单通道带宽限速（QoS 防挤占）</label>
+          <select id="tunnelBandwidth">
+            <option value="0" selected>不限速</option>
+            <option value="2">2 MB/s</option>
+            <option value="5">5 MB/s</option>
+            <option value="10">10 MB/s</option>
+            <option value="20">20 MB/s</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label>访问控制</label>
           <select id="tunnelAccessMode" onchange="onAccessModeChange()">
             <option value="link">仅授权链接（推荐）</option>
@@ -493,7 +517,7 @@
 
         <div class="modal-footer">
           <button type="button" class="btn-secondary" onclick="closeTunnelModal()">取消</button>
-          <button type="submit" class="btn-primary">保存通道</button>
+          <button type="submit" class="btn-primary" id="tunnelSaveBtn">保存通道</button>
         </div>
       </form>
     </div>
@@ -559,11 +583,11 @@
     </div>
   </div>
 
-  <!-- Modal: Tunnel Group -->
+  <!-- Modal: Edit Tunnel Group（新地址在新建代理通道表单里创建） -->
   <div class="modal-overlay" id="groupModal">
     <div class="modal-card">
       <div class="modal-header">
-        <h3 id="groupModalTitle">新建通道组</h3>
+        <h3>编辑通道组</h3>
         <button class="btn-secondary btn-sm" onclick="closeGroupModal()">✕</button>
       </div>
       <form onsubmit="saveGroup(event)">
@@ -577,51 +601,14 @@
           <label>责任人（可选）</label>
           <input type="text" id="groupOwner" placeholder="例如：张三 / 运维组">
         </div>
-        <div class="form-group">
-          <label id="groupTargetsLabel">目标主机与端口</label>
-          <div class="input-row">
-            <input type="text" id="groupHosts" placeholder="主机：10.0.1.11-13 或 10.0.1.11, 10.0.1.12（也可写 主机:端口）" oninput="scheduleGroupPreview()">
-            <input type="text" id="groupPorts" style="max-width: 140px;" placeholder="端口：22, 8080" oninput="scheduleGroupPreview()">
-          </div>
-          <div class="input-hint" id="groupPreview"></div>
-        </div>
         <div class="form-group" id="groupExistingWrap">
-          <label id="groupExistingLabel">或加入已有通道（可选）</label>
+          <label>把已有通道加入该组（可选）</label>
           <div class="check-list" id="groupExisting"></div>
         </div>
-        <div id="groupNewSettings" style="display:none;">
-          <div class="form-group">
-            <label>新建通道：闲置自动关闭</label>
-            <select id="groupIdleClose">
-              <option value="15">15 分钟</option>
-              <option value="30" selected>30 分钟</option>
-              <option value="60">1 小时</option>
-              <option value="120">2 小时</option>
-              <option value="0">不自动关闭</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>新建通道：最长开启时长</label>
-            <select id="groupMaxDuration">
-              <option value="0" selected>不限制</option>
-              <option value="120">2 小时</option>
-              <option value="480">8 小时</option>
-              <option value="1440">1 天</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>新建通道：访问控制</label>
-            <select id="groupAccessMode" onchange="onGroupAccessModeChange()">
-              <option value="link">仅授权链接（推荐）</option>
-              <option value="specific">固定 IP / 网段 + 授权链接</option>
-              <option value="all">全部放通 *（不安全）</option>
-            </select>
-            <input type="text" id="groupWhitelist" style="margin-top: 8px; display: none;" placeholder="例如 192.168.1.100, 192.168.1.0/24（逗号分隔）">
-          </div>
-        </div>
+        <div class="input-hint">要开放新的地址，请在通道组卡片上点「＋ 添加地址」</div>
         <div class="modal-footer">
           <button type="button" class="btn-secondary" onclick="closeGroupModal()">取消</button>
-          <button type="submit" class="btn-primary" id="groupSaveBtn">创建通道组</button>
+          <button type="submit" class="btn-primary">保存</button>
         </div>
       </form>
     </div>
@@ -934,7 +921,7 @@
 
       grid.innerHTML = entries.join('');
       if (currentTunnels.length === 0 && currentGroups.length === 0) {
-        grid.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">暂无中继通道，点击上方按钮添加第一个通道；需要一次开放多台主机时，用“新建通道组”</div>';
+        grid.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">暂无中继通道，点击上方按钮添加第一个通道；目标可以一次填多台主机，会放进同一个通道组</div>';
       } else if (entries.length === 0) {
         grid.innerHTML = `<div class="tunnel-card" style="text-align:center; padding: 40px; color: var(--text-muted);">
           <div style="font-size: 15px; color: var(--text); margin-bottom: 6px;">没有匹配的通道</div>
@@ -1076,15 +1063,20 @@
       await fetchTunnels();
     }
 
-    function openCreateModal() {
+    // 新建代理通道；groupId 非空时默认加入该通道组（通道组卡片上的「添加地址」）
+    function openCreateModal(groupId) {
       document.getElementById('modalTitle').innerText = '新建代理通道';
       document.getElementById('tunnelId').value = '';
       document.getElementById('tunnelName').value = '';
+      document.getElementById('tunnelOwner').value = '';
       document.getElementById('tunnelTarget').value = '';
+      document.getElementById('tunnelTargetLabel').innerText = '目标地址（中转机 Mac 可直连的内网目标，可填多个）';
+      document.getElementById('tunnelTarget').placeholder = '例如：10.0.0.10:3306；多台主机写 10.0.1.11-13:22';
       setAccessForm([]);
-      setLifecycleForm(30, 0);
-      fillTunnelGroupSelect('');
+      setLifecycleForm(30, 0, 0);
+      fillTunnelGroupSelect(groupId || '');
       document.getElementById('probeResult').innerText = '';
+      resetPlan();
       autoRecommendPort();
       document.getElementById('tunnelModal').classList.add('open');
     }
@@ -1095,12 +1087,16 @@
       document.getElementById('modalTitle').innerText = '编辑代理通道';
       document.getElementById('tunnelId').value = t.id;
       document.getElementById('tunnelName').value = t.name;
+      document.getElementById('tunnelOwner').value = t.owner || '';
       document.getElementById('tunnelTarget').value = t.target;
+      document.getElementById('tunnelTargetLabel').innerText = '目标地址（中转机 Mac 可直连的内网目标）';
+      document.getElementById('tunnelTarget').placeholder = '例如：10.0.0.10:3306';
       document.getElementById('tunnelPort').value = t.listen_port;
       setAccessForm(t.whitelist || []);
-      setLifecycleForm(t.effective_idle_close_minutes ?? 30, t.duration_minutes || 0);
+      setLifecycleForm(t.effective_idle_close_minutes ?? 30, t.duration_minutes || 0, t.max_bandwidth_mb || 0);
       fillTunnelGroupSelect(t.group_id || '');
       document.getElementById('probeResult').innerText = '';
+      resetPlan();
       document.getElementById('tunnelModal').classList.add('open');
     }
 
@@ -1118,43 +1114,177 @@
       }
     }
 
+    async function probeOne(target) {
+      const res = await fetch('/api/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target })
+      });
+      return res.json();
+    }
+
     async function probeTarget() {
       const target = document.getElementById('tunnelTarget').value.trim();
       if (!target) {
         alert('请先输入目标地址');
         return;
       }
+      const targets = isBatch() ? tunnelPlan.map(t => t.target) : [target];
       const hint = document.getElementById('probeResult');
       hint.innerText = '探测中...';
       hint.style.color = 'var(--text-muted)';
       try {
-        const res = await fetch('/api/probe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ target })
-        });
-        const data = await res.json();
-        if (data.reachable) {
-          hint.innerText = `✓ 连通性测试通过！延迟: ${data.rtt}`;
-          hint.style.color = 'var(--success)';
+        const results = await Promise.all(targets.map(t => probeOne(t).catch(() => ({ reachable: false, error: '探测请求失败' }))));
+        const failed = results.map((r, i) => [targets[i], r]).filter(([, r]) => !r.reachable);
+        if (targets.length === 1) {
+          const data = results[0];
+          hint.innerText = data.reachable ? `✓ 连通性测试通过！延迟: ${data.rtt}` : `✗ 连通失败: ${data.error || '连接超时'}`;
+        } else if (!failed.length) {
+          hint.innerText = `✓ 全部 ${targets.length} 个目标连通`;
         } else {
-          hint.innerText = `✗ 连通失败: ${data.error || '连接超时'}`;
-          hint.style.color = 'var(--danger)';
+          const [t, r] = failed[0];
+          hint.innerText = `✗ ${targets.length - failed.length}/${targets.length} 连通；${t} 连通失败: ${r.error || '连接超时'}` + (failed.length > 1 ? `（共 ${failed.length} 个失败）` : '');
         }
+        hint.style.color = failed.length ? 'var(--danger)' : 'var(--success)';
       } catch (e) {
         hint.innerText = '探测请求失败';
         hint.style.color = 'var(--danger)';
       }
     }
 
+    // ---- 多个目标：预览将创建的通道，并放进通道组 ----
+    let tunnelPlan = [], tunnelPlanError = null, planTimer = null;
+
+    function resetPlan() {
+      tunnelPlan = [];
+      tunnelPlanError = null;
+      clearTimeout(planTimer);
+      renderPlan();
+    }
+
+    // 可能填了多个目标（逗号 / 空格分隔，或含范围 "10.0.1.11-13:22"），需要服务端展开
+    function mayBeMulti() {
+      if (document.getElementById('tunnelId').value) return false;
+      const target = document.getElementById('tunnelTarget').value.trim();
+      return target.split(/[\s,，、;；]+/).filter(Boolean).length > 1 || target.includes('-');
+    }
+
+    function isBatch() {
+      return mayBeMulti() && tunnelPlan.length > 1;
+    }
+
+    // 通道组选项：'' 不分组，'__new__' 新建，其余为已有组 ID
+    function groupFields() {
+      const sel = document.getElementById('tunnelGroup').value;
+      if (sel === '__new__') {
+        const name = document.getElementById('tunnelNewGroup').value.trim() || document.getElementById('tunnelName').value.trim();
+        return { group_id: '', new_group: name };
+      }
+      return { group_id: sel, new_group: '' };
+    }
+
+    function tunnelPayload(port, whitelist) {
+      return {
+        name: document.getElementById('tunnelName').value.trim(),
+        owner: document.getElementById('tunnelOwner').value.trim(),
+        target: document.getElementById('tunnelTarget').value.trim(),
+        listen_port: port,
+        whitelist,
+        idle_close_minutes: parseInt(document.getElementById('tunnelIdleClose').value, 10),
+        duration_minutes: parseInt(document.getElementById('tunnelMaxDuration').value, 10),
+        max_bandwidth_mb: parseFloat(document.getElementById('tunnelBandwidth').value),
+        ...groupFields()
+      };
+    }
+
+    function schedulePlan() {
+      clearTimeout(planTimer);
+      if (!mayBeMulti()) { tunnelPlan = []; tunnelPlanError = null; renderPlan(); return; }
+      planTimer = setTimeout(async () => {
+        try {
+          const res = await fetch('/api/tunnels/batch', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...tunnelPayload(0, []), dry_run: true })
+          });
+          if (res.ok) {
+            tunnelPlan = (await res.json()).tunnels || [];
+            tunnelPlanError = null;
+          } else {
+            tunnelPlan = [];
+            tunnelPlanError = await apiError(res);
+          }
+        } catch (e) {
+          tunnelPlan = [];
+          tunnelPlanError = '预览失败：' + e.message;
+        }
+        renderPlan();
+      }, 300);
+    }
+
+    function renderPlan() {
+      const batch = isBatch();
+      const box = document.getElementById('tunnelPlan');
+      document.getElementById('tunnelPortWrap').style.display = batch ? 'none' : 'block';
+      // 多个目标必须放进同一个通道组
+      const sel = document.getElementById('tunnelGroup');
+      const none = sel.querySelector('option[value=""]');
+      if (none) none.disabled = batch;
+      if (batch && sel.value === '') { sel.value = '__new__'; onTunnelGroupChange(true); }
+      updateGroupHint();
+      document.getElementById('tunnelSaveBtn').innerText = batch ? `创建 ${tunnelPlan.length} 个通道` : '保存通道';
+      if (mayBeMulti() && tunnelPlanError) {
+        box.style.display = 'block';
+        box.style.color = 'var(--danger)';
+        box.innerText = tunnelPlanError;
+        return;
+      }
+      if (!batch) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      const shown = tunnelPlan.slice(0, 6);
+      box.style.display = 'block';
+      box.style.color = '';
+      box.innerHTML = shown.map(m => `<div class="preview-row"><span class="route-endpoint">${escapeHtml(publicHost)}:${m.listen_port}</span> <span class="route-arrow">➔</span> <span class="route-target">${escapeHtml(m.target)}</span></div>`).join('')
+        + `<div>${tunnelPlan.length > shown.length ? '… ' : ''}共 ${tunnelPlan.length} 个地址，每个地址一个通道，访问端口自动连续分配</div>`;
+    }
+
+    function fillTunnelGroupSelect(selected) {
+      document.getElementById('tunnelGroup').innerHTML =
+        '<option value="">不分组</option><option value="__new__">新建通道组</option>' +
+        (currentGroups.length ? '<option disabled>──────────</option>' : '') +
+        currentGroups.map(g => `<option value="${escapeHtml(g.id)}" ${g.id === selected ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('');
+      document.getElementById('tunnelNewGroup').value = '';
+      onTunnelGroupChange(true);
+    }
+
+    function updateGroupHint() {
+      const sel = document.getElementById('tunnelGroup').value;
+      const isNew = sel === '__new__';
+      const name = document.getElementById('tunnelName').value.trim();
+      const newInput = document.getElementById('tunnelNewGroup');
+      newInput.style.display = isNew ? 'block' : 'none';
+      newInput.placeholder = name ? `组名，默认「${name}」` : '通道组名称';
+      document.getElementById('tunnelGroupHint').innerText = isBatch()
+        ? '多个地址会放进同一个通道组：共用邀请和授权，同事授权一次即可访问全部地址'
+        : (sel ? '组内通道共用邀请和授权，同事授权一次即可访问组内全部地址' : '');
+      // 放进通道组时名称可以不填，按组名命名
+      const g = isNew ? newInput.value.trim() : (currentGroups.find(x => x.id === sel) || {}).name;
+      document.getElementById('tunnelName').placeholder = (!document.getElementById('tunnelId').value && g)
+        ? `可不填，默认「${g} (主机)」` : '例如：MySQL 实习库 或 财务系统 SSH';
+    }
+
+    function onTunnelGroupChange(skipPlan) {
+      updateGroupHint();
+      if (!skipPlan) schedulePlan();
+    }
+
     // 闲置自动关闭 / 最长开启时长；旧配置中不在选项里的值临时加入下拉框
-    function setLifecycleForm(idle, maxMinutes) {
+    function setLifecycleForm(idle, maxMinutes, bandwidth) {
       const ensure = (sel, v, label) => {
         if (![...sel.options].some(o => o.value === String(v))) sel.add(new Option(label, String(v)));
         sel.value = String(v);
       };
       ensure(document.getElementById('tunnelIdleClose'), idle, `${idle} 分钟`);
       ensure(document.getElementById('tunnelMaxDuration'), maxMinutes, fmtMinutes(maxMinutes));
+      ensure(document.getElementById('tunnelBandwidth'), bandwidth, `${bandwidth} MB/s`);
     }
 
     function setAccessForm(wl) {
@@ -1177,9 +1307,13 @@
     async function saveTunnel(e) {
       e.preventDefault();
       const id = document.getElementById('tunnelId').value;
-      const name = document.getElementById('tunnelName').value.trim();
-      const target = document.getElementById('tunnelTarget').value.trim();
+      const batch = isBatch();
+      const sel = document.getElementById('tunnelGroup').value;
       const port = parseInt(document.getElementById('tunnelPort').value, 10);
+      if (!batch && !(port > 33000 && port <= 34000)) { alert('端口须在 33001-34000 范围内'); return; }
+      if (mayBeMulti() && tunnelPlanError) { alert(tunnelPlanError); return; }
+      if (!document.getElementById('tunnelName').value.trim() && (id || !sel)) { alert('请填写通道名称'); return; }
+      if (sel === '__new__' && !groupFields().new_group) { alert('请填写通道组名称'); return; }
       const mode = document.getElementById('tunnelAccessMode').value;
       let whitelist = [];
       if (mode === 'all') whitelist = ['*'];
@@ -1188,44 +1322,28 @@
         if (whitelist.length === 0) { alert('请填写允许访问的 IP 或网段，或选择“仅授权链接”'); return; }
         if (whitelist.includes('*')) { alert('如需放通全部，请选择“全部放通 *”'); return; }
       }
-
-      // 编辑时只提交表单中的字段，其余（责任人、时长、限速等）由后端保留
-      const payload = {
-        name,
-        target,
-        listen_port: port,
-        whitelist,
-        idle_close_minutes: parseInt(document.getElementById('tunnelIdleClose').value, 10),
-        duration_minutes: parseInt(document.getElementById('tunnelMaxDuration').value, 10),
-        group_id: document.getElementById('tunnelGroup').value
-      };
+      const payload = tunnelPayload(batch ? 0 : port, whitelist);
 
       try {
-        const res = id
-          ? await fetch(`/api/tunnels/${encodeURIComponent(id)}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload)
-            })
-          : await fetch('/api/tunnels', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload)
-            });
+        // 新建统一走 /api/tunnels/batch：单个目标、多个目标、新建或加入通道组都在这一个表单里
+        const res = await fetch(id ? `/api/tunnels/${encodeURIComponent(id)}` : '/api/tunnels/batch', {
+          method: id ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
         if (!res.ok) {
           alert((id ? '保存失败: ' : '创建失败: ') + await apiError(res));
           return;
         }
-        // 新建“仅授权链接”通道后直接生成邀请
-        if (!id && mode !== 'all') {
-          const created = await res.json();
-          closeTunnelModal();
-          await fetchTunnels();
-          setTimeout(() => openInviteModal('t:' + created.id, false), 800);
-          return;
-        }
+        const data = await res.json();
         closeTunnelModal();
         await fetchTunnels();
+        // 新建后直接生成邀请：新建的通道组邀请整组；加入已有组时组的授权自动覆盖新地址，不用再邀请
+        const joinsExisting = sel !== '' && sel !== '__new__';
+        if (!id && mode !== 'all' && !joinsExisting) {
+          const key = data.group ? 'g:' + data.group.id : 't:' + data.tunnels[0].id;
+          setTimeout(() => openInviteModal(key, false), 800);
+        }
       } catch (err) {
         alert('保存错误: ' + err.message);
       }
@@ -1668,7 +1786,8 @@
           <div class="member-list">
             ${shown.map(t => memberRowHtml(g, t)).join('')}
             ${hidden > 0 ? `<div class="member-hint">已按搜索 / 筛选隐藏 ${hidden} 个地址</div>` : ''}
-            ${!members.length ? '<div class="member-hint">组内暂无通道，点击“编辑”添加目标或把已有通道加入该组</div>' : ''}
+            ${!members.length ? '<div class="member-hint">组内暂无通道</div>' : ''}
+            <button class="add-member" onclick="openCreateModal('${gid}')" title="在该组里开放新的主机或端口，组的邀请和授权自动覆盖新地址">＋ 添加地址</button>
           </div>
           <div class="tunnel-bottom">
             <div class="metrics-summary">
@@ -1710,31 +1829,18 @@
       await fetchTunnels();
     }
 
-    // ---- 新建 / 编辑通道组 ----
-    let groupPreviewTimer = null, groupPreviewOK = false;
-
+    // ---- 编辑通道组：名称、责任人、把已有通道加入该组 ----
     function openGroupModal(id) {
-      const g = id ? currentGroups.find(x => x.id === id) : null;
-      document.getElementById('groupModalTitle').innerText = g ? '编辑通道组' : '新建通道组';
-      document.getElementById('groupSaveBtn').innerText = g ? '保存' : '创建通道组';
-      document.getElementById('groupTargetsLabel').innerText = g ? '追加目标（可选）' : '目标主机与端口';
-      document.getElementById('groupId').value = g ? g.id : '';
-      document.getElementById('groupName').value = g ? g.name : '';
-      document.getElementById('groupOwner').value = g ? (g.owner || '') : '';
-      document.getElementById('groupHosts').value = '';
-      document.getElementById('groupPorts').value = '';
-      document.getElementById('groupIdleClose').value = '30';
-      document.getElementById('groupMaxDuration').value = '0';
-      document.getElementById('groupAccessMode').value = 'link';
-      document.getElementById('groupWhitelist').value = '';
-      onGroupAccessModeChange();
+      const g = currentGroups.find(x => x.id === id);
+      if (!g) return;
+      document.getElementById('groupId').value = g.id;
+      document.getElementById('groupName').value = g.name;
+      document.getElementById('groupOwner').value = g.owner || '';
       const free = currentTunnels.filter(t => !t.group_id);
       document.getElementById('groupExistingWrap').style.display = free.length ? 'block' : 'none';
-      document.getElementById('groupExistingLabel').innerText = g ? '把已有通道加入该组（可选）' : '或加入已有通道（可选）';
       document.getElementById('groupExisting').innerHTML = free.map(t => `
         <label class="check-item"><input type="checkbox" value="${escapeHtml(t.id)}">
           <span>${escapeHtml(t.name)}</span><code>:${t.listen_port} → ${escapeHtml(t.target)}</code></label>`).join('');
-      renderGroupPreview(null);
       document.getElementById('groupModal').classList.add('open');
     }
 
@@ -1742,81 +1848,20 @@
       document.getElementById('groupModal').classList.remove('open');
     }
 
-    function onGroupAccessModeChange() {
-      const mode = document.getElementById('groupAccessMode').value;
-      document.getElementById('groupWhitelist').style.display = mode === 'specific' ? 'block' : 'none';
-    }
-
-    function renderGroupPreview(result) {
-      const box = document.getElementById('groupPreview');
-      const hasHosts = document.getElementById('groupHosts').value.trim() !== '';
-      document.getElementById('groupNewSettings').style.display = hasHosts ? 'block' : 'none';
-      groupPreviewOK = !hasHosts;
-      if (!hasHosts || !result) {
-        box.innerHTML = '每个 主机 × 端口 会创建一个通道，并分配一段连续的访问端口';
-        box.style.color = '';
-        return;
-      }
-      if (result.error) {
-        box.innerText = result.error;
-        box.style.color = 'var(--danger)';
-        return;
-      }
-      groupPreviewOK = result.members.length > 0;
-      box.style.color = '';
-      const shown = result.members.slice(0, 6);
-      box.innerHTML = shown.map(m => `<div class="preview-row"><span class="route-endpoint">${escapeHtml(publicHost)}:${m.listen_port}</span> <span class="route-arrow">➔</span> <span class="route-target">${escapeHtml(m.target)}</span></div>`).join('')
-        + `<div>${result.members.length > shown.length ? '… ' : ''}共 ${result.members.length} 个地址</div>`;
-    }
-
-    function scheduleGroupPreview() {
-      clearTimeout(groupPreviewTimer);
-      groupPreviewTimer = setTimeout(async () => {
-        const hosts = document.getElementById('groupHosts').value;
-        if (!hosts.trim()) { renderGroupPreview(null); return; }
-        try {
-          const res = await fetch('/api/groups/preview', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: document.getElementById('groupName').value.trim() || '通道组', hosts, ports: document.getElementById('groupPorts').value })
-          });
-          renderGroupPreview(res.ok ? await res.json() : { error: await apiError(res) });
-        } catch (e) {
-          renderGroupPreview({ error: '预览失败：' + e.message });
-        }
-      }, 300);
-    }
-
     async function saveGroup(e) {
       e.preventDefault();
       const id = document.getElementById('groupId').value;
-      const hosts = document.getElementById('groupHosts').value.trim();
-      const tunnelIds = [...document.querySelectorAll('#groupExisting input:checked')].map(i => i.value);
-      if (!id && !hosts && !tunnelIds.length) { alert('请填写目标主机与端口，或选择要加入的已有通道'); return; }
-      if (hosts && !groupPreviewOK) { alert('请先修正目标主机与端口'); return; }
-      const mode = document.getElementById('groupAccessMode').value;
-      let whitelist = [];
-      if (mode === 'all') whitelist = ['*'];
-      if (mode === 'specific') {
-        whitelist = document.getElementById('groupWhitelist').value.split(',').map(s => s.trim()).filter(Boolean);
-        if (hosts && !whitelist.length) { alert('请填写允许访问的 IP 或网段，或选择“仅授权链接”'); return; }
-      }
       const payload = {
         name: document.getElementById('groupName').value.trim(),
         owner: document.getElementById('groupOwner').value.trim(),
-        hosts, ports: hosts ? document.getElementById('groupPorts').value : '',
-        tunnel_ids: tunnelIds, whitelist,
-        idle_close_minutes: parseInt(document.getElementById('groupIdleClose').value, 10),
-        duration_minutes: parseInt(document.getElementById('groupMaxDuration').value, 10),
+        tunnel_ids: [...document.querySelectorAll('#groupExisting input:checked')].map(i => i.value)
       };
-      const res = await fetch(id ? `/api/groups/${encodeURIComponent(id)}` : '/api/groups', {
-        method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      const res = await fetch(`/api/groups/${encodeURIComponent(id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
       });
       if (!res.ok) { alert('保存失败: ' + await apiError(res)); return; }
-      const data = await res.json();
       closeGroupModal();
       await fetchTunnels();
-      // 新建通道组后直接打开整组的邀请设置
-      if (!id && mode !== 'all' && data.group) setTimeout(() => openInviteModal('g:' + data.group.id, false), 800);
     }
 
     // ---- 删除 / 解散通道组 ----
@@ -1841,13 +1886,6 @@
       if (!res.ok) alert('删除失败: ' + await apiError(res));
       closeGroupDelete();
       await fetchTunnels();
-    }
-
-    function fillTunnelGroupSelect(selected) {
-      const wrap = document.getElementById('tunnelGroupWrap');
-      wrap.style.display = currentGroups.length ? 'block' : 'none';
-      document.getElementById('tunnelGroup').innerHTML = '<option value="">不属于任何组</option>' +
-        currentGroups.map(g => `<option value="${escapeHtml(g.id)}" ${g.id === selected ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('');
     }
 
     async function killConns(ids) {

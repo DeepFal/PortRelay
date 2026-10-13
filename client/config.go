@@ -364,33 +364,131 @@ func (cm *ConfigManager) AddTunnel(t protocol.TunnelConfig) (protocol.TunnelConf
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	t.ID = uuid.New().String()
-	t.AuthCode = generateAuthCode()
-	t.HistoricalBytesIn, t.HistoricalBytesOut, t.LastDurationSec = 0, 0, 0
-	t.CloseReason, t.FirstConnectedAt, t.ConnectedSec, t.LastConnectedSec = "", nil, 0, 0
-	if t.IdleCloseMinutes == nil {
-		v := DefaultIdleCloseMinutes
-		t.IdleCloseMinutes = &v
-	}
-	t.DynamicWhitelist = nil
-	if err := cm.checkPortLocked(t.ID, t.ListenPort); err != nil {
+	if err := cm.checkPortLocked("", t.ListenPort); err != nil {
 		return t, err
 	}
 	if !cm.groupExistsLocked(t.GroupID) {
 		return t, fmt.Errorf("通道组不存在")
 	}
+	prepareNew(&t, time.Now())
+	cm.cfg.Tunnels = append(cm.cfg.Tunnels, t)
+	return cloneTunnel(t), cm.save()
+}
 
+// prepareNew resets the program-maintained fields of a tunnel being created and opens it
+func prepareNew(t *protocol.TunnelConfig, now time.Time) {
+	t.ID = uuid.New().String()
+	t.AuthCode = generateAuthCode()
+	t.HistoricalBytesIn, t.HistoricalBytesOut, t.LastDurationSec = 0, 0, 0
+	t.CloseReason, t.FirstConnectedAt, t.ConnectedSec, t.LastConnectedSec = "", nil, 0, 0
+	t.DynamicWhitelist = nil
+	if t.IdleCloseMinutes == nil {
+		v := DefaultIdleCloseMinutes
+		t.IdleCloseMinutes = &v
+	}
 	t.Enabled = true
-	now := time.Now()
-	t.StartedAt = &now
+	start := now
+	t.StartedAt = &start
 	t.ExpiresAt = nil
 	if t.DurationMinutes > 0 {
 		exp := now.Add(time.Duration(t.DurationMinutes) * time.Minute)
 		t.ExpiresAt = &exp
 	}
+}
 
-	cm.cfg.Tunnels = append(cm.cfg.Tunnels, t)
-	return cloneTunnel(t), cm.save()
+// NewTunnels is one submission of the add-tunnel form
+type NewTunnels struct {
+	// Template 通道设置。Target 可以写多个目标（见 ExpandTargets）；ListenPort 只用于单个目标，
+	// 多个目标自动分配一段连续端口；GroupID 表示加入已有通道组。
+	Template protocol.TunnelConfig
+	// NewGroup 新建一个通道组并把这些通道放进去
+	NewGroup string
+}
+
+// CreateTunnels adds the tunnels of one add-tunnel form. Several targets become one tunnel each,
+// named "名称 (主机)", and must go into a group; a group member without a name is named after the
+// group. With dryRun nothing is saved and the result is a preview.
+// Returns the group the tunnels joined (nil when ungrouped) and the created tunnels.
+func (cm *ConfigManager) CreateTunnels(req NewTunnels, dryRun bool) (*TunnelGroup, []protocol.TunnelConfig, error) {
+	tpl := req.Template
+	targets, err := ExpandTargets(tpl.Target, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	newGroup := strings.TrimSpace(req.NewGroup)
+
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	var group *TunnelGroup
+	switch {
+	case newGroup != "":
+		if err := cm.checkGroupNameLocked("", newGroup); err != nil {
+			return nil, nil, err
+		}
+		group = &TunnelGroup{ID: uuid.New().String(), Name: newGroup, Owner: strings.TrimSpace(tpl.Owner), CreatedAt: time.Now()}
+	case tpl.GroupID != "":
+		g, ok := cm.findGroupLocked(tpl.GroupID)
+		if !ok {
+			return nil, nil, fmt.Errorf("通道组不存在")
+		}
+		group = &g
+	case len(targets) > 1 && !dryRun:
+		return nil, nil, fmt.Errorf("多个目标需要放进同一个通道组，请选择或新建通道组")
+	}
+
+	name := strings.TrimSpace(tpl.Name)
+	base := name
+	if base == "" && group != nil {
+		base = group.Name
+	}
+	if base == "" && dryRun {
+		base = "通道"
+	}
+	names := []string{base}
+	if len(targets) > 1 || (name == "" && group != nil) {
+		names = memberNames(base, targets)
+	}
+
+	var ports []int
+	if len(targets) == 1 && tpl.ListenPort > 0 {
+		if err := cm.checkPortLocked("", tpl.ListenPort); err != nil {
+			return nil, nil, err
+		}
+		ports = []int{tpl.ListenPort}
+	} else if ports, err = cm.allocatePortsLocked(len(targets)); err != nil {
+		return nil, nil, err
+	}
+
+	now := time.Now()
+	created := make([]protocol.TunnelConfig, 0, len(targets))
+	for i, target := range targets {
+		t := cloneTunnel(tpl)
+		t.Name, t.Target, t.ListenPort, t.GroupID = names[i], target, ports[i], ""
+		if group != nil {
+			t.GroupID = group.ID
+		}
+		if err := normalizeAndValidate(&t); err != nil {
+			if len(targets) > 1 {
+				err = fmt.Errorf("%s：%w", target, err)
+			}
+			return nil, nil, err
+		}
+		prepareNew(&t, now)
+		created = append(created, t)
+	}
+	if dryRun {
+		return group, created, nil
+	}
+	if newGroup != "" {
+		cm.cfg.Groups = append(cm.cfg.Groups, *group)
+	}
+	cm.cfg.Tunnels = append(cm.cfg.Tunnels, created...)
+	out := make([]protocol.TunnelConfig, len(created))
+	for i, t := range created {
+		out[i] = cloneTunnel(t)
+	}
+	return group, out, cm.save()
 }
 
 // PatchTunnel applies a partial JSON update: only fields present in patch change.
@@ -416,6 +514,11 @@ func (cm *ConfigManager) PatchTunnel(id string, patch []byte) (protocol.TunnelCo
 	if err := json.Unmarshal(patch, &updated); err != nil {
 		return existing, existing.ListenPort, fmt.Errorf("Invalid JSON")
 	}
+	// new_group：新建一个通道组并把该通道移进去
+	var extra struct {
+		NewGroup string `json:"new_group"`
+	}
+	_ = json.Unmarshal(patch, &extra)
 
 	// 受保护字段
 	updated.ID = existing.ID
@@ -438,7 +541,14 @@ func (cm *ConfigManager) PatchTunnel(id string, patch []byte) (protocol.TunnelCo
 	if err := cm.checkPortLocked(id, updated.ListenPort); err != nil {
 		return existing, existing.ListenPort, err
 	}
-	if !cm.groupExistsLocked(updated.GroupID) {
+	var newGroup *TunnelGroup
+	if name := strings.TrimSpace(extra.NewGroup); name != "" {
+		if err := cm.checkGroupNameLocked("", name); err != nil {
+			return existing, existing.ListenPort, err
+		}
+		newGroup = &TunnelGroup{ID: uuid.New().String(), Name: name, Owner: updated.Owner, CreatedAt: time.Now()}
+		updated.GroupID = newGroup.ID
+	} else if !cm.groupExistsLocked(updated.GroupID) {
 		return existing, existing.ListenPort, fmt.Errorf("通道组不存在")
 	}
 
@@ -455,6 +565,9 @@ func (cm *ConfigManager) PatchTunnel(id string, patch []byte) (protocol.TunnelCo
 		}
 	}
 
+	if newGroup != nil {
+		cm.cfg.Groups = append(cm.cfg.Groups, *newGroup)
+	}
 	cm.cfg.Tunnels[idx] = updated
 	return cloneTunnel(updated), existing.ListenPort, cm.save()
 }
@@ -739,12 +852,32 @@ func (cm *ConfigManager) RecommendPort() int {
 func (cm *ConfigManager) FindGroup(id string) (TunnelGroup, bool) {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
+	return cm.findGroupLocked(id)
+}
+
+func (cm *ConfigManager) findGroupLocked(id string) (TunnelGroup, bool) {
 	for _, g := range cm.cfg.Groups {
 		if g.ID == id {
 			return g, true
 		}
 	}
 	return TunnelGroup{}, false
+}
+
+// checkGroupNameLocked validates the name for group id ("" for a new group). Caller must hold cm.mu.
+func (cm *ConfigManager) checkGroupNameLocked(id, name string) error {
+	if name == "" {
+		return fmt.Errorf("请填写通道组名称")
+	}
+	if len([]rune(name)) > 64 {
+		return fmt.Errorf("通道组名称不能超过 64 个字")
+	}
+	for _, g := range cm.cfg.Groups {
+		if g.ID != id && g.Name == name {
+			return fmt.Errorf("已有同名的通道组「%s」", name)
+		}
+	}
+	return nil
 }
 
 // GroupMembers returns the tunnels of a group ordered by listen port
@@ -765,101 +898,38 @@ func (cm *ConfigManager) groupMembersLocked(id string) []protocol.TunnelConfig {
 	return out
 }
 
-// GroupSpec describes a group and the members to add to it
+// GroupSpec describes a group's name and owner, and existing tunnels to move into it.
+// 新通道统一在添加通道表单里创建（见 CreateTunnels）。
 type GroupSpec struct {
-	Name  string
-	Owner string
-	// Targets 新建成员的目标（已展开的 主机:端口）
-	Targets []string
-	// Template 新建成员的通道设置：白名单、闲置关闭、最长开启时长、限速
-	Template protocol.TunnelConfig
-	// MoveIDs 加入该组的已有通道
+	Name    string
+	Owner   string
 	MoveIDs []string
 }
 
-// newMembersLocked builds (but does not store) the tunnels for spec.Targets. Caller must hold cm.mu.
-func (cm *ConfigManager) newMembersLocked(groupID string, spec GroupSpec, now time.Time) ([]protocol.TunnelConfig, error) {
-	if len(spec.Targets) == 0 {
-		return nil, nil
-	}
-	ports, err := cm.allocatePortsLocked(len(spec.Targets))
-	if err != nil {
-		return nil, err
-	}
-	names := memberNames(spec.Name, spec.Targets)
-	out := make([]protocol.TunnelConfig, 0, len(spec.Targets))
-	for i, target := range spec.Targets {
-		t := cloneTunnel(spec.Template)
-		t.ID = uuid.New().String()
-		t.Name, t.Target, t.ListenPort = names[i], target, ports[i]
-		t.GroupID = groupID
-		if strings.TrimSpace(t.Owner) == "" {
-			t.Owner = spec.Owner
-		}
-		if err := normalizeAndValidate(&t); err != nil {
-			return nil, fmt.Errorf("%s：%w", target, err)
-		}
-		t.AuthCode = generateAuthCode()
-		t.HistoricalBytesIn, t.HistoricalBytesOut, t.LastDurationSec = 0, 0, 0
-		t.CloseReason, t.FirstConnectedAt, t.ConnectedSec, t.LastConnectedSec = "", nil, 0, 0
-		t.DynamicWhitelist = nil
-		if t.IdleCloseMinutes == nil {
-			v := DefaultIdleCloseMinutes
-			t.IdleCloseMinutes = &v
-		}
-		t.Enabled = true
-		start := now
-		t.StartedAt = &start
-		t.ExpiresAt = nil
-		if t.DurationMinutes > 0 {
-			exp := now.Add(time.Duration(t.DurationMinutes) * time.Minute)
-			t.ExpiresAt = &exp
-		}
-		out = append(out, t)
-	}
-	return out, nil
-}
-
-// PreviewGroupMembers returns the tunnels that saving spec would create, without saving anything
-func (cm *ConfigManager) PreviewGroupMembers(spec GroupSpec) ([]protocol.TunnelConfig, error) {
-	if strings.TrimSpace(spec.Name) == "" {
-		spec.Name = "通道组"
-	}
-	spec.Name = strings.TrimSpace(spec.Name)
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return cm.newMembersLocked("", spec, time.Now())
-}
-
-// SaveGroup creates a group (id == "") or renames / adds members to an existing one.
-// Returns the group, the tunnels it created and the existing members whose config changed
-// (moved in, or the group was renamed) — the caller pushes both to the relay server.
-func (cm *ConfigManager) SaveGroup(id string, spec GroupSpec) (TunnelGroup, []protocol.TunnelConfig, []protocol.TunnelConfig, error) {
+// SaveGroup creates a group from existing tunnels (id == "") or renames / adds members to one.
+// Returns the group and the members whose config changed (moved in, or the group was renamed)
+// — the caller pushes them to the relay server.
+func (cm *ConfigManager) SaveGroup(id string, spec GroupSpec) (TunnelGroup, []protocol.TunnelConfig, error) {
 	spec.Name = strings.TrimSpace(spec.Name)
 	spec.Owner = strings.TrimSpace(spec.Owner)
-	if spec.Name == "" {
-		return TunnelGroup{}, nil, nil, fmt.Errorf("请填写通道组名称")
-	}
-	if len([]rune(spec.Name)) > 64 {
-		return TunnelGroup{}, nil, nil, fmt.Errorf("通道组名称不能超过 64 个字")
-	}
 
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
+	if err := cm.checkGroupNameLocked(id, spec.Name); err != nil {
+		return TunnelGroup{}, nil, err
+	}
 	gi := -1
 	for i, g := range cm.cfg.Groups {
 		if id != "" && g.ID == id {
 			gi = i
-		} else if g.Name == spec.Name {
-			return TunnelGroup{}, nil, nil, fmt.Errorf("已有同名的通道组「%s」", spec.Name)
 		}
 	}
 	if id != "" && gi < 0 {
-		return TunnelGroup{}, nil, nil, fmt.Errorf("通道组不存在")
+		return TunnelGroup{}, nil, fmt.Errorf("通道组不存在")
 	}
-	if id == "" && len(spec.Targets) == 0 && len(spec.MoveIDs) == 0 {
-		return TunnelGroup{}, nil, nil, fmt.Errorf("请添加至少一个目标，或选择要加入的已有通道")
+	if id == "" && len(spec.MoveIDs) == 0 {
+		return TunnelGroup{}, nil, fmt.Errorf("请选择要放进该组的通道")
 	}
 
 	group := TunnelGroup{ID: id, Name: spec.Name, Owner: spec.Owner, CreatedAt: time.Now()}
@@ -878,18 +948,13 @@ func (cm *ConfigManager) SaveGroup(id string, spec GroupSpec) (TunnelGroup, []pr
 			}
 			found = true
 			if t.GroupID != "" && t.GroupID != group.ID {
-				return TunnelGroup{}, nil, nil, fmt.Errorf("「%s」已属于其它通道组，请先将其移出", t.Name)
+				return TunnelGroup{}, nil, fmt.Errorf("「%s」已属于其它通道组，请先将其移出", t.Name)
 			}
 		}
 		if !found {
-			return TunnelGroup{}, nil, nil, fmt.Errorf("通道 %s 未找到", mid)
+			return TunnelGroup{}, nil, fmt.Errorf("通道 %s 未找到", mid)
 		}
 		move[mid] = true
-	}
-
-	created, err := cm.newMembersLocked(group.ID, spec, time.Now())
-	if err != nil {
-		return TunnelGroup{}, nil, nil, err
 	}
 
 	renamed := gi >= 0 && cm.cfg.Groups[gi].Name != group.Name
@@ -903,17 +968,12 @@ func (cm *ConfigManager) SaveGroup(id string, spec GroupSpec) (TunnelGroup, []pr
 			changed = append(changed, cloneTunnel(t))
 		}
 	}
-	cm.cfg.Tunnels = append(cm.cfg.Tunnels, created...)
 	if gi >= 0 {
 		cm.cfg.Groups[gi] = group
 	} else {
 		cm.cfg.Groups = append(cm.cfg.Groups, group)
 	}
-	out := make([]protocol.TunnelConfig, len(created))
-	for i, t := range created {
-		out[i] = cloneTunnel(t)
-	}
-	return group, out, changed, cm.save()
+	return group, changed, cm.save()
 }
 
 // RemoveGroup dissolves a group. With deleteMembers its tunnels are deleted too, otherwise they

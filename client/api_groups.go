@@ -46,42 +46,16 @@ func (s *APIServer) groupsView(metrics protocol.MetricsMessage) []GroupView {
 	return out
 }
 
-// groupRequest creates a group or adds members to one
+// groupRequest renames a group or moves existing tunnels into it
 type groupRequest struct {
 	Name  string `json:"name"`
 	Owner string `json:"owner"`
-	// Hosts / Ports 展开为新建成员，见 ExpandTargets
-	Hosts string `json:"hosts"`
-	Ports string `json:"ports"`
 	// TunnelIDs 加入该组的已有通道
 	TunnelIDs []string `json:"tunnel_ids"`
-	// 新建成员的通道设置
-	Whitelist        []string `json:"whitelist"`
-	IdleCloseMinutes *int     `json:"idle_close_minutes"`
-	DurationMinutes  int      `json:"duration_minutes"`
-	MaxBandwidthMB   float64  `json:"max_bandwidth_mb"`
 }
 
-func (req groupRequest) spec() (GroupSpec, error) {
-	spec := GroupSpec{
-		Name:    req.Name,
-		Owner:   req.Owner,
-		MoveIDs: req.TunnelIDs,
-		Template: protocol.TunnelConfig{
-			Whitelist:        req.Whitelist,
-			IdleCloseMinutes: req.IdleCloseMinutes,
-			DurationMinutes:  req.DurationMinutes,
-			MaxBandwidthMB:   req.MaxBandwidthMB,
-		},
-	}
-	if strings.TrimSpace(req.Hosts) != "" {
-		targets, err := ExpandTargets(req.Hosts, req.Ports)
-		if err != nil {
-			return spec, err
-		}
-		spec.Targets = targets
-	}
-	return spec, nil
+func (req groupRequest) spec() GroupSpec {
+	return GroupSpec{Name: req.Name, Owner: req.Owner, MoveIDs: req.TunnelIDs}
 }
 
 func decodeGroupRequest(r *http.Request) (groupRequest, error) {
@@ -93,11 +67,8 @@ func decodeGroupRequest(r *http.Request) (groupRequest, error) {
 	return req, err
 }
 
-// syncGroupChanges pushes newly created members and changed existing ones to the relay server
-func (s *APIServer) syncGroupChanges(created, changed []protocol.TunnelConfig) {
-	for _, t := range created {
-		s.agent.SyncTunnel(t, false)
-	}
+// syncChanged pushes members whose group changed to the relay server
+func (s *APIServer) syncChanged(changed []protocol.TunnelConfig) {
 	for _, t := range changed {
 		if t.Enabled {
 			s.agent.SyncTunnel(t, true)
@@ -105,7 +76,7 @@ func (s *APIServer) syncGroupChanges(created, changed []protocol.TunnelConfig) {
 	}
 }
 
-// handleGroups: GET 列表；POST 新建通道组（批量新建目标 + / 或加入已有通道）
+// handleGroups: GET 列表；POST 用已有通道组成通道组（新通道在添加通道表单里创建，见 handleTunnelBatch）
 func (s *APIServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -116,18 +87,13 @@ func (s *APIServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
-		spec, err := req.spec()
+		g, changed, err := s.cm.SaveGroup("", req.spec())
 		if err != nil {
 			jsonError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		g, created, changed, err := s.cm.SaveGroup("", spec)
-		if err != nil {
-			jsonError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		s.syncGroupChanges(created, changed)
-		jsonResponse(w, http.StatusCreated, map[string]any{"group": g, "created": nonNil(created)})
+		s.syncChanged(changed)
+		jsonResponse(w, http.StatusCreated, map[string]any{"group": g})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -135,8 +101,7 @@ func (s *APIServer) handleGroups(w http.ResponseWriter, r *http.Request) {
 
 // handleGroupItem:
 //
-//	POST   /api/groups/preview          预览批量展开结果（不保存）
-//	PUT    /api/groups/{id}             改名 / 责任人，并可追加成员
+//	PUT    /api/groups/{id}             改名 / 责任人，并可把已有通道加入该组
 //	DELETE /api/groups/{id}?delete_members=1   解散（默认保留成员为独立通道）
 //	POST   /api/groups/{id}/toggle      {"enabled": bool} 整组开关
 //	...    /api/groups/{id}/leases|invites|requests  与单个通道相同的授权接口
@@ -144,10 +109,6 @@ func (s *APIServer) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 3 || parts[2] == "" {
 		jsonError(w, http.StatusBadRequest, "Missing group ID")
-		return
-	}
-	if parts[2] == "preview" && len(parts) == 3 && r.Method == http.MethodPost {
-		s.handleGroupPreview(w, r)
 		return
 	}
 	id := parts[2]
@@ -203,18 +164,13 @@ func (s *APIServer) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.Name) == "" {
 			req.Name = g.Name
 		}
-		spec, err := req.spec()
+		updated, changed, err := s.cm.SaveGroup(id, req.spec())
 		if err != nil {
 			jsonError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		updated, created, changed, err := s.cm.SaveGroup(id, spec)
-		if err != nil {
-			jsonError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		s.syncGroupChanges(created, changed)
-		jsonResponse(w, http.StatusOK, map[string]any{"group": updated, "created": nonNil(created)})
+		s.syncChanged(changed)
+		jsonResponse(w, http.StatusOK, map[string]any{"group": updated})
 
 	case http.MethodDelete:
 		deleteMembers := r.URL.Query().Get("delete_members") == "1"
@@ -240,38 +196,35 @@ func (s *APIServer) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleGroupPreview expands hosts × ports and assigns ports without saving
-func (s *APIServer) handleGroupPreview(w http.ResponseWriter, r *http.Request) {
-	req, err := decodeGroupRequest(r)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "Invalid JSON")
+// handleTunnelBatch: POST /api/tunnels/batch —— 添加通道表单的提交，可以一次创建单个或多个通道。
+// 请求体是通道设置，另加：
+//
+//	target     可以写多个目标，如 "10.0.1.11-13:22, 10.0.2.5:3306"（见 ExpandTargets）
+//	group_id   加入已有通道组；new_group 新建通道组。多个目标必须放进通道组
+//	dry_run    只预览将创建的通道（名称、目标、分配的端口），不保存
+//
+// 返回 {"group": 加入的通道组或 null, "tunnels": [...]}
+func (s *APIServer) handleTunnelBatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		protocol.TunnelConfig
+		NewGroup string `json:"new_group"`
+		DryRun   bool   `json:"dry_run"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
-	spec, err := req.spec()
+	group, created, err := s.cm.CreateTunnels(NewTunnels{Template: req.TunnelConfig, NewGroup: req.NewGroup}, req.DryRun)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	members, err := s.cm.PreviewGroupMembers(spec)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
-		return
+	status := http.StatusOK
+	if !req.DryRun {
+		status = http.StatusCreated
+		for _, t := range created {
+			s.agent.SyncTunnel(t, false)
+		}
 	}
-	type item struct {
-		Name       string `json:"name"`
-		Target     string `json:"target"`
-		ListenPort int    `json:"listen_port"`
-	}
-	out := make([]item, 0, len(members))
-	for _, t := range members {
-		out = append(out, item{t.Name, t.Target, t.ListenPort})
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{"members": out})
-}
-
-func nonNil(ts []protocol.TunnelConfig) []protocol.TunnelConfig {
-	if ts == nil {
-		return []protocol.TunnelConfig{}
-	}
-	return ts
+	jsonResponse(w, status, map[string]any{"group": group, "tunnels": created})
 }

@@ -134,15 +134,50 @@ struct GroupMetricsItem: Codable {
     var pending: [AccessRequestItem]?
 }
 
-struct GroupPreviewMember: Codable, Identifiable {
-    var id: String { target }
+/// 添加通道表单将创建（或已创建）的通道
+struct PlannedTunnel: Codable, Identifiable {
+    var id: String
     var name: String
     var target: String
     var listen_port: Int
 }
 
-struct GroupPreviewResp: Codable {
-    var members: [GroupPreviewMember]
+struct GroupRef: Codable {
+    var id: String
+    var name: String
+}
+
+/// /api/tunnels/batch 的返回：加入的通道组（未分组为 nil）与创建的通道
+struct BatchResp: Codable {
+    var group: GroupRef?
+    var tunnels: [PlannedTunnel]
+}
+
+/// 添加 / 编辑通道表单的内容；新建时 target 可以写多个目标
+struct TunnelForm {
+    var name: String
+    var owner: String
+    var target: String
+    /// 0 表示自动分配；多个目标时总是自动分配一段连续端口
+    var port: Int
+    var whitelist: [String]
+    var durationMinutes: Int
+    var idleCloseMinutes: Int
+    var maxBandwidthMB: Double
+    /// 加入已有通道组
+    var groupId: String
+    /// 新建通道组的名称
+    var newGroup: String
+
+    var body: [String: Any] {
+        [
+            "name": name, "owner": owner, "target": target, "listen_port": port,
+            // 空数组表示“仅授权链接”
+            "whitelist": whitelist,
+            "duration_minutes": durationMinutes, "idle_close_minutes": idleCloseMinutes,
+            "max_bandwidth_mb": maxBandwidthMB, "group_id": groupId, "new_group": newGroup
+        ]
+    }
 }
 
 /// 授权的作用范围：单个通道，或整个通道组
@@ -1103,41 +1138,38 @@ class PortRelayViewModel: ObservableObject {
         }
     }
 
-    /// 新建（id 为 nil）或修改通道组：hosts × ports 展开为新成员，tunnelIds 为加入的已有通道
-    func saveGroup(id: String?, name: String, owner: String, hosts: String, ports: String, tunnelIds: [String],
-                   whitelist: [String], idleCloseMinutes: Int, durationMinutes: Int, maxBandwidthMB: Double) async -> (String?, String?) {
-        let body: [String: Any] = [
-            "name": name, "owner": owner, "hosts": hosts, "ports": ports, "tunnel_ids": tunnelIds,
-            "whitelist": whitelist, "idle_close_minutes": idleCloseMinutes,
-            "duration_minutes": durationMinutes, "max_bandwidth_mb": maxBandwidthMB
-        ]
-        let (data, err) = await apiCall(id == nil ? "POST" : "PUT", id == nil ? "/api/groups" : "/api/groups/\(id!)", body: body)
-        guard let data = data else { return (nil, err) }
-        let gid = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["group"] as? [String: Any])?["id"] as? String
+    /// 修改通道组名称 / 责任人，并把已有通道加入该组（新地址在添加通道表单里创建）
+    func saveGroup(id: String, name: String, owner: String, tunnelIds: [String]) async -> String? {
+        let (_, err) = await apiCall("PUT", "/api/groups/\(id)", body: ["name": name, "owner": owner, "tunnel_ids": tunnelIds])
         await refreshData()
-        return (gid, nil)
+        return err
     }
 
-    /// 预览批量展开结果（不保存）
-    func previewGroup(name: String, hosts: String, ports: String) async -> ([GroupPreviewMember], String?) {
+    /// 预览添加通道表单将创建的通道（多个目标时），不保存
+    func previewTunnels(_ form: TunnelForm) async -> ([PlannedTunnel], String?) {
         if isPreview {
-            // 预览模式只模拟最常见的写法：逗号分隔，以及末段范围 "10.0.3.11-13"
-            let hostList = hosts.split(whereSeparator: { ", ，\n".contains($0) }).flatMap { item -> [String] in
-                let parts = item.split(separator: ".")
-                guard parts.count == 4, let dash = parts[3].firstIndex(of: "-"),
-                      let lo = Int(parts[3][..<dash]), let hi = Int(parts[3][parts[3].index(after: dash)...]), lo <= hi else { return [String(item)] }
-                return (lo...hi).map { parts[0..<3].joined(separator: ".") + ".\($0)" }
+            // 预览模式只模拟常见写法：逗号分隔，以及末段范围 "10.0.3.11-13:22"
+            var out: [PlannedTunnel] = []
+            for item in form.target.split(whereSeparator: { ", ，\n".contains($0) }) {
+                let hp = item.split(separator: ":")
+                guard hp.count == 2 else { continue }
+                let parts = hp[0].split(separator: ".")
+                var hosts = [String(hp[0])]
+                if parts.count == 4, let dash = parts[3].firstIndex(of: "-"),
+                   let lo = Int(parts[3][..<dash]), let hi = Int(parts[3][parts[3].index(after: dash)...]), lo <= hi {
+                    hosts = (lo...hi).map { parts[0..<3].joined(separator: ".") + ".\($0)" }
+                }
+                for h in hosts {
+                    out.append(PlannedTunnel(id: "\(h):\(hp[1])", name: "\(form.name) (\(h))", target: "\(h):\(hp[1])", listen_port: 33673 + out.count))
+                }
             }
-            let portList = ports.split(whereSeparator: { ", ，".contains($0) }).map(String.init)
-            var out: [GroupPreviewMember] = []
-            for h in hostList { for p in portList {
-                out.append(GroupPreviewMember(name: "\(name) (\(h))", target: "\(h):\(p)", listen_port: 33670 + out.count))
-            } }
             return (out, nil)
         }
-        let (data, err) = await apiCall("POST", "/api/groups/preview", body: ["name": name, "hosts": hosts, "ports": ports])
+        var body = form.body
+        body["dry_run"] = true
+        let (data, err) = await apiCall("POST", "/api/tunnels/batch", body: body)
         guard let data = data else { return ([], err) }
-        return ((try? JSONDecoder().decode(GroupPreviewResp.self, from: data))?.members ?? [], nil)
+        return ((try? JSONDecoder().decode(BatchResp.self, from: data))?.tunnels ?? [], nil)
     }
 
     func toggleGroup(id: String, enabled: Bool) async {
@@ -1179,59 +1211,40 @@ class PortRelayViewModel: ObservableObject {
         await refreshData()
     }
 
-    func saveTunnel(
-        id: String?,
-        name: String,
-        target: String,
-        port: Int,
-        whitelist: [String],
-        owner: String,
-        durationMinutes: Int,
-        idleCloseMinutes: Int,
-        maxBandwidthMB: Double,
-        groupId: String = ""
-    ) async -> (Bool, String?, String?) {
-        let isEdit = (id != nil && !id!.isEmpty)
-        let endpoint = isEdit ? "http://127.0.0.1:33080/api/tunnels/\(id!)" : "http://127.0.0.1:33080/api/tunnels"
-        guard let url = URL(string: endpoint) else { return (false, "无效地址", nil) }
-
-        var req = URLRequest(url: url)
-        req.httpMethod = isEdit ? "PUT" : "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "name": name,
-            "target": target,
-            "listen_port": port,
-            // 空数组表示“仅授权链接”
-            "whitelist": whitelist,
-            "owner": owner,
-            "duration_minutes": durationMinutes,
-            "idle_close_minutes": idleCloseMinutes,
-            "max_bandwidth_mb": maxBandwidthMB,
-            "group_id": groupId
-        ]
-
-        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
-            return (false, "JSON 序列化失败", nil)
-        }
-        req.httpBody = httpBody
-
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            if let httpResp = resp as? HTTPURLResponse, httpResp.statusCode >= 400 {
-                if let errJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let errMsg = errJson["error"] as? String {
-                    return (false, errMsg, nil)
-                }
-                return (false, "保存失败", nil)
-            }
-            let savedId = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["id"] as? String
+    /// 保存添加 / 编辑通道表单。新建时可一次创建多个通道并放进通道组，返回创建结果
+    func saveTunnel(id: String?, form: TunnelForm) async -> (Bool, BatchResp?, String?) {
+        if let id = id, !id.isEmpty {
+            let (_, err) = await apiCall("PUT", "/api/tunnels/\(id)", body: form.body)
+            if let err = err { return (false, nil, err) }
             await refreshData()
-            return (true, nil, savedId)
-        } catch {
-            return (false, error.localizedDescription, nil)
+            return (true, nil, nil)
         }
+        let (data, err) = await apiCall("POST", "/api/tunnels/batch", body: form.body)
+        guard let data = data else { return (false, nil, err) }
+        await refreshData()
+        return (true, try? JSONDecoder().decode(BatchResp.self, from: data), nil)
+    }
+
+    /// 同时测试多个目标的连通性，全部连通才算成功
+    func probeTargets(_ targets: [String]) async -> (Bool, String) {
+        if targets.count == 1 { return await probeTarget(target: targets[0]) }
+        var failed: [String: String] = [:]
+        await withTaskGroup(of: (String, Bool, String).self) { group in
+            for t in targets {
+                group.addTask {
+                    let (ok, msg) = await self.probeTarget(target: t)
+                    return (t, ok, msg)
+                }
+            }
+            for await (t, ok, msg) in group where !ok {
+                failed[t] = msg
+            }
+        }
+        guard let first = targets.first(where: { failed[$0] != nil }) else {
+            return (true, "全部 \(targets.count) 个目标连接成功")
+        }
+        let more = failed.count > 1 ? "（共 \(failed.count) 个失败）" : ""
+        return (false, "\(targets.count - failed.count)/\(targets.count) 连接成功；\(first) \(failed[first] ?? "")\(more)")
     }
 
     func probeTarget(target: String) async -> (Bool, String) {
@@ -1543,7 +1556,8 @@ class PortRelayViewModel: ObservableObject {
 @MainActor
 struct ContentView: View {
     @ObservedObject var vm: PortRelayViewModel
-    @State private var showingAddSheet = false
+    /// 添加通道弹窗（通道组卡片上的「添加地址」会带上组）
+    @State private var addSheet: AddSheetTarget?
     @State private var showingSettingsSheet = false
     @State private var showingDiagnosticsSheet = false
     // 用 sheet(item:) 直接把要操作的通道传给弹窗；
@@ -1552,7 +1566,6 @@ struct ContentView: View {
     /// 邀请弹窗：通道 + 是否打开即生成（新建通道后直接出分享卡片）
     @State private var inviteTarget: InviteSheetTarget?
     @State private var clientsTarget: ClientsSheetTarget?
-    /// 新建（group 为 nil）或编辑通道组
     @State private var groupSheet: GroupSheetTarget?
     // 通道搜索与状态筛选
     @State private var searchText: String = ""
@@ -1701,6 +1714,7 @@ struct ContentView: View {
                                         visible: shown,
                                         vm: vm,
                                         onEdit: { groupSheet = GroupSheetTarget(group: g) },
+                                        onAddMember: { addSheet = AddSheetTarget(groupId: g.id) },
                                         onInvite: { inviteTarget = InviteSheetTarget(scope: .group(g.id), autoGenerate: false) },
                                         onViewClients: { tab in clientsTarget = ClientsSheetTarget(scope: .group(g.id), tab: tab) },
                                         onEditMember: { t in editingTunnel = t },
@@ -1733,13 +1747,16 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 920, minHeight: 640)
-        .sheet(isPresented: $showingAddSheet) {
-            TunnelEditSheet(vm: vm, tunnel: nil, isPresented: $showingAddSheet, onCreated: { id in
-                // 新建完成后打开邀请设置（时长、审批在邀请中选择）
+        .sheet(item: $addSheet) { target in
+            TunnelEditSheet(vm: vm, tunnel: nil, isPresented: Binding(
+                get: { addSheet != nil },
+                set: { if !$0 { addSheet = nil } }
+            ), groupId: target.groupId, onCreated: { scope in
+                // 新建完成后打开邀请设置（时长、审批在邀请中选择）；新建的通道组直接邀请整组
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 600_000_000)
-                    if let t = vm.tunnels.first(where: { $0.id == id }) {
-                        inviteTarget = InviteSheetTarget(tunnel: t, autoGenerate: false)
+                    if vm.scopeEnabled(scope) {
+                        inviteTarget = InviteSheetTarget(scope: scope, autoGenerate: false)
                     }
                 }
             })
@@ -1760,15 +1777,7 @@ struct ContentView: View {
             GroupEditSheet(vm: vm, group: target.group, isPresented: Binding(
                 get: { groupSheet != nil },
                 set: { if !$0 { groupSheet = nil } }
-            ), onCreated: { gid in
-                // 新建完成后直接打开整组的邀请设置
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 600_000_000)
-                    if vm.scopeEnabled(.group(gid)) {
-                        inviteTarget = InviteSheetTarget(scope: .group(gid), autoGenerate: false)
-                    }
-                }
-            })
+            ))
         }
         .sheet(isPresented: $showingSettingsSheet) {
             SettingsSheet(vm: vm, isPresented: $showingSettingsSheet)
@@ -1823,14 +1832,7 @@ struct ContentView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
-            Button(action: { groupSheet = GroupSheetTarget(group: nil) }) {
-                Label("新建通道组", systemImage: "square.stack.3d.up")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("一次添加多个主机 / 端口，共用一条邀请链接")
-
-            Button(action: { showingAddSheet = true }) {
+            Button(action: { addSheet = AddSheetTarget(groupId: nil) }) {
                 Label("添加通道", systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
@@ -1947,7 +1949,7 @@ struct ContentView: View {
                 .foregroundColor(.secondary)
             Text("无活动通道")
                 .font(.system(size: 13, weight: .medium))
-            Text("点击右上角「添加通道」创建反向中继端口；需要一次开放多台主机时，用「新建通道组」")
+            Text("点击右上角「添加通道」创建反向中继端口；目标可以一次填多台主机，会放进同一个通道组")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
         }
@@ -2327,6 +2329,8 @@ struct GroupCardView: View {
     let visible: [TunnelItem]
     @ObservedObject var vm: PortRelayViewModel
     let onEdit: () -> Void
+    /// 在该组里开放新的地址（打开添加通道表单）
+    let onAddMember: () -> Void
     let onInvite: () -> Void
     let onViewClients: (Int) -> Void
     let onEditMember: (TunnelItem) -> Void
@@ -2452,10 +2456,17 @@ struct GroupCardView: View {
                         .foregroundColor(.secondary)
                 }
             } else if members.isEmpty {
-                Text("组内暂无通道，点击“编辑”添加目标或把已有通道加入该组")
+                Text("组内暂无通道")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
+
+            Button(action: onAddMember) {
+                Label("添加地址", systemImage: "plus")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .help("在该组里开放新的主机或端口，组的邀请和授权自动覆盖新地址")
 
             Divider()
 
@@ -3483,21 +3494,37 @@ struct TunnelEditSheet: View {
     @State private var maxBandwidthMB: Double // 0 为不限速
     @State private var whitelistString: String
     @State private var accessMode: AccessMode
-    @State private var groupId: String
+    @State private var groupChoice: GroupChoice
+    @State private var newGroupName: String = ""
+    /// 填了多个目标时将创建的通道（服务端预览）
+    @State private var plan: [PlannedTunnel] = []
+    @State private var planError: String? = nil
     @State private var probeMessage: String = ""
+    @State private var probeOK: Bool = false
     @State private var isProbing: Bool = false
+    @State private var isSaving: Bool = false
     @State private var errorMessage: String? = nil
 
-    var onCreated: ((String) -> Void)? = nil
+    /// 新建完成后打开邀请：独立通道，或新建的通道组。加入已有组时不需要——组的授权自动覆盖新地址
+    var onCreated: ((AccessScope) -> Void)? = nil
 
     enum AccessMode: String, CaseIterable {
         case linkOnly, specific, all
     }
 
+    /// 通道组选项：不分组、新建、或加入已有组
+    enum GroupChoice: Hashable {
+        case none
+        case new
+        case existing(String)
+    }
+
     var isEdit: Bool { tunnel != nil }
 
-    /// 表单字段在创建时就用通道数据填好，不依赖 onAppear（避免第一帧显示空表单）
-    init(vm: PortRelayViewModel, tunnel: TunnelItem?, isPresented: Binding<Bool>, onCreated: ((String) -> Void)? = nil) {
+    /// 表单字段在创建时就用通道数据填好，不依赖 onAppear（避免第一帧显示空表单）。
+    /// groupId：新建时默认加入的通道组（通道组卡片上的「添加地址」）
+    init(vm: PortRelayViewModel, tunnel: TunnelItem?, isPresented: Binding<Bool>, groupId: String? = nil,
+         draftName: String = "", draftTarget: String = "", onCreated: ((AccessScope) -> Void)? = nil) {
         _vm = ObservedObject(wrappedValue: vm)
         self.tunnel = tunnel
         self.onCreated = onCreated
@@ -3505,18 +3532,79 @@ struct TunnelEditSheet: View {
         let wl = tunnel?.whitelist ?? []
         let mode: AccessMode = wl.isEmpty ? .linkOnly : (wl.contains("*") ? .all : .specific)
         _accessMode = State(initialValue: mode)
-        _name = State(initialValue: tunnel?.name ?? "")
+        _name = State(initialValue: tunnel?.name ?? draftName)
         _owner = State(initialValue: tunnel.map { $0.owner ?? "" } ?? NSUserName())
-        _target = State(initialValue: tunnel?.target ?? "")
+        _target = State(initialValue: tunnel?.target ?? draftTarget)
         _portString = State(initialValue: tunnel.map { "\($0.listen_port)" } ?? "")
-        // duration_minutes 为 0 时 JSON 中会省略，缺省即“不限制”；新建默认 2 小时
-        // 最长开启时长：新建默认不限制（主要依靠闲置自动关闭）
+        // 最长开启时长：新建默认不限制（主要依靠闲置自动关闭）；duration_minutes 为 0 时 JSON 中会省略
         _durationMinutes = State(initialValue: tunnel.map { $0.duration_minutes ?? 0 } ?? 0)
         _idleCloseMinutes = State(initialValue: tunnel?.effective_idle_close_minutes ?? 30)
         _maxBandwidthMB = State(initialValue: tunnel?.max_bandwidth_mb ?? 0)
         _whitelistString = State(initialValue: mode == .specific ? wl.joined(separator: ", ") : "")
-        _groupId = State(initialValue: tunnel?.group_id ?? "")
+        let gid = tunnel?.group_id ?? groupId ?? ""
+        _groupChoice = State(initialValue: gid.isEmpty ? .none : .existing(gid))
     }
+
+    // MARK: Derived state
+
+    /// 可能填了多个目标（逗号 / 空格分隔，或含范围 "10.0.1.11-13:22"），需要服务端展开
+    var mayBeMulti: Bool {
+        guard !isEdit else { return false }
+        let items = target.split(whereSeparator: { " ,，、;；\n\t".contains($0) })
+        return items.count > 1 || target.contains("-")
+    }
+
+    /// 确实会创建多个通道
+    var isBatch: Bool { mayBeMulti && plan.count > 1 }
+
+    /// 新建通道组的名称：没填时与通道名称相同
+    var resolvedGroupName: String {
+        let n = newGroupName.trimmingCharacters(in: .whitespaces)
+        return n.isEmpty ? name.trimmingCharacters(in: .whitespaces) : n
+    }
+
+    /// 选中的通道组名称（不分组为 nil）
+    var chosenGroupName: String? {
+        switch groupChoice {
+        case .none: return nil
+        case .new: return newGroupName.trimmingCharacters(in: .whitespaces)
+        case .existing(let id): return vm.group(id)?.name
+        }
+    }
+
+    var namePlaceholder: String {
+        if !isEdit, let g = chosenGroupName, !g.isEmpty {
+            return "可不填，默认「\(g) (主机)」"
+        }
+        return isBatch ? "例如：订单服务" : "例如：MySQL 实习库"
+    }
+
+    var canSave: Bool {
+        if isSaving || target.trimmingCharacters(in: .whitespaces).isEmpty { return false }
+        if mayBeMulti && planError != nil { return false }
+        let hasName = !name.trimmingCharacters(in: .whitespaces).isEmpty
+        switch groupChoice {
+        case .none: return hasName
+        case .new: return !resolvedGroupName.isEmpty && (hasName || !isEdit)
+        case .existing: return hasName || !isEdit
+        }
+    }
+
+    func makeForm(port: Int, whitelist: [String]) -> TunnelForm {
+        var groupId = "", newGroup = ""
+        switch groupChoice {
+        case .none: break
+        case .new: newGroup = resolvedGroupName
+        case .existing(let id): groupId = id
+        }
+        return TunnelForm(
+            name: name.trimmingCharacters(in: .whitespaces), owner: owner.trimmingCharacters(in: .whitespaces),
+            target: target.trimmingCharacters(in: .whitespacesAndNewlines), port: port, whitelist: whitelist,
+            durationMinutes: durationMinutes, idleCloseMinutes: idleCloseMinutes, maxBandwidthMB: maxBandwidthMB,
+            groupId: groupId, newGroup: newGroup)
+    }
+
+    // MARK: Body
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -3524,156 +3612,38 @@ struct TunnelEditSheet: View {
                 .font(.system(size: 15, weight: .bold))
 
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("通道名称")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                    TextField("例如：MySQL 实习库", text: $name)
+                field("通道名称") {
+                    TextField(namePlaceholder, text: $name)
                         .textFieldStyle(.roundedBorder)
                 }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("关联责任人")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                field("关联责任人") {
                     TextField("例如：张三 / 数据组", text: $owner)
                         .textFieldStyle(.roundedBorder)
                 }
             }
 
-            if !vm.groups.isEmpty {
-                HStack(spacing: 8) {
-                    Text("所属通道组")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                    Picker("", selection: $groupId) {
-                        Text("不属于任何组").tag("")
-                        ForEach(vm.groups) { g in
-                            Text(verbatim: g.name).tag(g.id)
+            targetSection
+
+            if !isBatch {
+                field("对外监听端口 (范围 33001-34000)") {
+                    HStack {
+                        TextField("33660", text: $portString)
+                            .textFieldStyle(.roundedBorder)
+                        Button("自动分配") {
+                            Task { portString = "\(await vm.recommendPort())" }
                         }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: 260)
-                    Spacer()
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("目标服务 (内网主机 IP:端口)")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                HStack {
-                    TextField("例如 10.0.0.10:3306", text: $target)
-                        .textFieldStyle(.roundedBorder)
-                    Button(isProbing ? "测试中" : "连通性测试") {
-                        Task {
-                            isProbing = true
-                            let (_, msg) = await vm.probeTarget(target: target)
-                            probeMessage = msg
-                            isProbing = false
-                        }
-                    }
-                    .disabled(target.isEmpty || isProbing)
-                    .controlSize(.small)
-                }
-                if !probeMessage.isEmpty {
-                    Text(probeMessage)
-                        .font(.system(size: 11))
-                        .foregroundColor(probeMessage.contains("成功") ? .green : .red)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("对外监听端口 (范围 33001-34000)")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                HStack {
-                    TextField("33660", text: $portString)
-                        .textFieldStyle(.roundedBorder)
-                    Button("自动分配") {
-                        Task {
-                            let p = await vm.recommendPort()
-                            portString = "\(p)"
-                        }
-                    }
-                    .controlSize(.small)
-                }
-            }
-
-            // Auto close: idle (primary) + optional hard cap
-            VStack(alignment: .leading, spacing: 6) {
-                Text("闲置自动关闭（没有连接、有效授权、待审批和可用邀请时开始计时）")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                HStack(spacing: 6) {
-                    ForEach(idleCloseOptions, id: \.0) { opt in
-                        DurationChip(title: opt.1, minutes: opt.0, selectedMinutes: $idleCloseMinutes)
-                    }
-                }
-                Text("最长开启时长（可选，到时无论是否在用都会关闭）")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .padding(.top, 2)
-                HStack(spacing: 6) {
-                    DurationChip(title: "不限制", minutes: 0, selectedMinutes: $durationMinutes)
-                    DurationChip(title: "2 小时", minutes: 120, selectedMinutes: $durationMinutes)
-                    DurationChip(title: "8 小时", minutes: 480, selectedMinutes: $durationMinutes)
-                    DurationChip(title: "1 天", minutes: 1440, selectedMinutes: $durationMinutes)
-                    DurationChip(title: "7 天", minutes: 10080, selectedMinutes: $durationMinutes)
-                    // 兼容旧配置中的其他时长
-                    if ![0, 120, 480, 1440, 10080].contains(durationMinutes) {
-                        DurationChip(title: formatSecondsToDuration(Int64(durationMinutes) * 60), minutes: durationMinutes, selectedMinutes: $durationMinutes)
+                        .controlSize(.small)
                     }
                 }
             }
 
-            // QoS Bandwidth Limit Option
-            VStack(alignment: .leading, spacing: 4) {
-                Text("单通道带宽限速 (QoS 防挤占)")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                
-                HStack(spacing: 6) {
-                    BandwidthChip(title: "不限速", mb: 0, selectedMB: $maxBandwidthMB)
-                    BandwidthChip(title: "2 MB/s", mb: 2, selectedMB: $maxBandwidthMB)
-                    BandwidthChip(title: "5 MB/s", mb: 5, selectedMB: $maxBandwidthMB)
-                    BandwidthChip(title: "10 MB/s", mb: 10, selectedMB: $maxBandwidthMB)
-                    BandwidthChip(title: "20 MB/s", mb: 20, selectedMB: $maxBandwidthMB)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("访问控制")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                Picker("", selection: $accessMode) {
-                    Text("仅授权链接（推荐）").tag(AccessMode.linkOnly)
-                    Text("固定 IP / 网段").tag(AccessMode.specific)
-                    Text("全部放通 *").tag(AccessMode.all)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                switch accessMode {
-                case .linkOnly:
-                    Text("只有通过邀请链接授权的设备可以访问，保存后可以直接设置并生成邀请链接。")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                case .specific:
-                    TextField("例如 192.168.1.100, 192.168.1.0/24（逗号分隔）", text: $whitelistString)
-                        .textFieldStyle(.roundedBorder)
-                    Text("名单内的设备始终可以访问；其他人仍可通过邀请链接临时授权。")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                case .all:
-                    Label("任何能访问服务器的设备都可以连接，不建议用于数据库等敏感服务。", systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(.red)
-                }
-            }
+            groupSection
+            closeSection
+            bandwidthSection
+            accessSection
 
             if let err = errorMessage {
-                Text(err)
+                Text(verbatim: err)
                     .font(.system(size: 12))
                     .foregroundColor(.red)
             }
@@ -3682,54 +3652,10 @@ struct TunnelEditSheet: View {
                 Spacer()
                 Button("取消") { isPresented = false }
                     .controlSize(.small)
-                Button("保存") {
-                    guard let p = Int(portString), p > 33000 && p <= 34000 else {
-                        errorMessage = "端口须在 33001-34000 范围内"
-                        return
-                    }
-                    var wl: [String] = []
-                    switch accessMode {
-                    case .linkOnly:
-                        wl = []
-                    case .all:
-                        wl = ["*"]
-                    case .specific:
-                        wl = whitelistString.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                        if wl.isEmpty {
-                            errorMessage = "请填写允许访问的 IP 或网段，或选择“仅授权链接”"
-                            return
-                        }
-                        if wl.contains("*") {
-                            errorMessage = "如需放通全部，请选择“全部放通 *”"
-                            return
-                        }
-                    }
-                    Task {
-                        let (ok, err, savedId) = await vm.saveTunnel(
-                            id: tunnel?.id,
-                            name: name,
-                            target: target,
-                            port: p,
-                            whitelist: wl,
-                            owner: owner.trimmingCharacters(in: .whitespaces),
-                            durationMinutes: durationMinutes,
-                            idleCloseMinutes: idleCloseMinutes,
-                            maxBandwidthMB: maxBandwidthMB,
-                            groupId: groupId
-                        )
-                        if ok {
-                            isPresented = false
-                            if !isEdit, accessMode != .all, let id = savedId {
-                                onCreated?(id)
-                            }
-                        } else {
-                            errorMessage = err ?? "保存失败"
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(name.isEmpty || target.isEmpty)
+                Button(isSaving ? "保存中…" : (isBatch ? "创建 \(plan.count) 个通道" : "保存")) { save() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(!canSave)
             }
             .padding(.top, 4)
         }
@@ -3743,112 +3669,337 @@ struct TunnelEditSheet: View {
                 }
             }
         }
+        .task(id: "\(target)|\(name)|\(newGroupName)|\(groupChoice)") { await refreshPlan() }
+        .onChange(of: isBatch) { batch in
+            // 多个目标必须放进同一个通道组
+            if batch && groupChoice == .none { groupChoice = .new }
+        }
+    }
+
+    // MARK: Sections
+
+    var targetSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(isEdit ? "目标服务 (内网主机 IP:端口)" : "目标服务 (内网主机 IP:端口，可填多个)")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            HStack {
+                TextField(isEdit ? "例如 10.0.0.10:3306" : "例如 10.0.0.10:3306；多台主机写 10.0.1.11-13:22", text: $target)
+                    .textFieldStyle(.roundedBorder)
+                Button(isProbing ? "测试中" : "连通性测试") { probe() }
+                    .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty || isProbing || (mayBeMulti && planError != nil))
+                    .controlSize(.small)
+            }
+            if !probeMessage.isEmpty {
+                Text(verbatim: probeMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(probeOK ? .green : .red)
+            }
+            if mayBeMulti, let err = planError {
+                Text(verbatim: err)
+                    .font(.system(size: 11))
+                    .foregroundColor(.red)
+            } else if isBatch {
+                planList
+            }
+        }
+    }
+
+    /// 多个目标时：每个地址分到的访问端口
+    var planList: some View {
+        let shown = plan.prefix(6)
+        return VStack(alignment: .leading, spacing: 3) {
+            ForEach(Array(shown)) { m in
+                HStack(spacing: 6) {
+                    Text(verbatim: "\(vm.publicHost):\(m.listen_port)")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 8))
+                        .foregroundColor(.secondary)
+                    Text(verbatim: m.target)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            Text(verbatim: (plan.count > shown.count ? "… " : "") + "共 \(plan.count) 个地址，每个地址一个通道，访问端口自动连续分配")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
+    }
+
+    var groupSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("通道组")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                Picker("", selection: $groupChoice) {
+                    if !isBatch {
+                        Text("不分组").tag(GroupChoice.none)
+                    }
+                    Text("新建通道组").tag(GroupChoice.new)
+                    if !vm.groups.isEmpty {
+                        Divider()
+                        ForEach(vm.groups) { g in
+                            Text(verbatim: g.name).tag(GroupChoice.existing(g.id))
+                        }
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                if groupChoice == .new {
+                    TextField(name.trimmingCharacters(in: .whitespaces).isEmpty ? "通道组名称" : "组名，默认「\(name.trimmingCharacters(in: .whitespaces))」", text: $newGroupName)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            if isBatch {
+                Text("多个地址会放进同一个通道组：共用邀请和授权，同事授权一次即可访问全部地址")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } else if groupChoice != .none {
+                Text("组内通道共用邀请和授权，同事授权一次即可访问组内全部地址")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    /// 自动关闭：闲置关闭（主要）+ 可选的最长开启时长
+    var closeSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("闲置自动关闭（没有连接、有效授权、待审批和可用邀请时开始计时）")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            HStack(spacing: 6) {
+                ForEach(idleCloseOptions, id: \.0) { opt in
+                    DurationChip(title: opt.1, minutes: opt.0, selectedMinutes: $idleCloseMinutes)
+                }
+            }
+            Text("最长开启时长（可选，到时无论是否在用都会关闭）")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .padding(.top, 2)
+            HStack(spacing: 6) {
+                DurationChip(title: "不限制", minutes: 0, selectedMinutes: $durationMinutes)
+                DurationChip(title: "2 小时", minutes: 120, selectedMinutes: $durationMinutes)
+                DurationChip(title: "8 小时", minutes: 480, selectedMinutes: $durationMinutes)
+                DurationChip(title: "1 天", minutes: 1440, selectedMinutes: $durationMinutes)
+                DurationChip(title: "7 天", minutes: 10080, selectedMinutes: $durationMinutes)
+                // 兼容旧配置中的其他时长
+                if ![0, 120, 480, 1440, 10080].contains(durationMinutes) {
+                    DurationChip(title: formatSecondsToDuration(Int64(durationMinutes) * 60), minutes: durationMinutes, selectedMinutes: $durationMinutes)
+                }
+            }
+        }
+    }
+
+    var bandwidthSection: some View {
+        field("单通道带宽限速 (QoS 防挤占)") {
+            HStack(spacing: 6) {
+                BandwidthChip(title: "不限速", mb: 0, selectedMB: $maxBandwidthMB)
+                BandwidthChip(title: "2 MB/s", mb: 2, selectedMB: $maxBandwidthMB)
+                BandwidthChip(title: "5 MB/s", mb: 5, selectedMB: $maxBandwidthMB)
+                BandwidthChip(title: "10 MB/s", mb: 10, selectedMB: $maxBandwidthMB)
+                BandwidthChip(title: "20 MB/s", mb: 20, selectedMB: $maxBandwidthMB)
+            }
+        }
+    }
+
+    var accessSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("访问控制")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            Picker("", selection: $accessMode) {
+                Text("仅授权链接（推荐）").tag(AccessMode.linkOnly)
+                Text("固定 IP / 网段").tag(AccessMode.specific)
+                Text("全部放通 *").tag(AccessMode.all)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            switch accessMode {
+            case .linkOnly:
+                Text("只有通过邀请链接授权的设备可以访问，保存后可以直接设置并生成邀请链接。")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            case .specific:
+                TextField("例如 192.168.1.100, 192.168.1.0/24（逗号分隔）", text: $whitelistString)
+                    .textFieldStyle(.roundedBorder)
+                Text("名单内的设备始终可以访问；其他人仍可通过邀请链接临时授权。")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            case .all:
+                Label("任何能访问服务器的设备都可以连接，不建议用于数据库等敏感服务。", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.red)
+            }
+        }
+    }
+
+    func field<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            content()
+        }
+    }
+
+    // MARK: Actions
+
+    func refreshPlan() async {
+        guard mayBeMulti else {
+            plan = []
+            planError = nil
+            return
+        }
+        // 输入停顿后再预览，避免每敲一个字就请求一次
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        guard !Task.isCancelled else { return }
+        let (items, err) = await vm.previewTunnels(makeForm(port: 0, whitelist: []))
+        guard !Task.isCancelled else { return }
+        plan = items
+        planError = err
+    }
+
+    func probe() {
+        let targets = isBatch ? plan.map { $0.target } : [target.trimmingCharacters(in: .whitespaces)]
+        isProbing = true
+        Task {
+            let (ok, msg) = await vm.probeTargets(targets)
+            probeOK = ok
+            probeMessage = msg
+            isProbing = false
+        }
+    }
+
+    /// 访问控制对应的白名单；填写有误时提示并返回 nil
+    func whitelist() -> [String]? {
+        switch accessMode {
+        case .linkOnly:
+            return []
+        case .all:
+            return ["*"]
+        case .specific:
+            let wl = whitelistString.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            if wl.isEmpty {
+                errorMessage = "请填写允许访问的 IP 或网段，或选择“仅授权链接”"
+                return nil
+            }
+            if wl.contains("*") {
+                errorMessage = "如需放通全部，请选择“全部放通 *”"
+                return nil
+            }
+            return wl
+        }
+    }
+
+    func save() {
+        var port = 0
+        if !isBatch {
+            guard let p = Int(portString), p > 33000 && p <= 34000 else {
+                errorMessage = "端口须在 33001-34000 范围内"
+                return
+            }
+            port = p
+        }
+        guard let wl = whitelist() else { return }
+        let form = makeForm(port: port, whitelist: wl)
+        var joinsExisting = false
+        if case .existing = groupChoice { joinsExisting = true }
+        isSaving = true
+        errorMessage = nil
+        Task {
+            let (ok, created, err) = await vm.saveTunnel(id: tunnel?.id, form: form)
+            isSaving = false
+            guard ok else {
+                errorMessage = err ?? "保存失败"
+                return
+            }
+            isPresented = false
+            guard !isEdit, !joinsExisting, accessMode != .all, let created = created else { return }
+            if let g = created.group {
+                onCreated?(.group(g.id))
+            } else if let t = created.tunnels.first {
+                onCreated?(.tunnel(t.id))
+            }
+        }
     }
 }
 
 // MARK: - Tunnel Group Edit Sheet
 
-struct GroupSheetTarget: Identifiable {
-    let group: GroupItem?
-    var id: String { group?.id ?? "new" }
+/// 添加通道弹窗；groupId 非空时默认加入该通道组
+struct AddSheetTarget: Identifiable {
+    let groupId: String?
+    var id: String { groupId ?? "new" }
 }
 
-/// 新建 / 编辑通道组：批量添加“主机 × 端口”，也可以把已有通道加入该组
+struct GroupSheetTarget: Identifiable {
+    let group: GroupItem
+    var id: String { group.id }
+}
+
+/// 编辑通道组：名称、责任人，以及把已有通道加入该组。新地址在「添加通道」里创建
 struct GroupEditSheet: View {
     @ObservedObject var vm: PortRelayViewModel
-    let group: GroupItem?
+    let group: GroupItem
     @Binding var isPresented: Bool
-    var onCreated: ((String) -> Void)? = nil
 
     @State private var name: String
     @State private var owner: String
-    @State private var hosts: String = ""
-    @State private var ports: String = ""
     @State private var moveIDs: Set<String> = []
-    @State private var idleCloseMinutes: Int = 30
-    @State private var durationMinutes: Int = 0
-    @State private var accessMode: TunnelEditSheet.AccessMode = .linkOnly
-    @State private var whitelistString: String = ""
-    @State private var preview: [GroupPreviewMember] = []
-    @State private var previewError: String? = nil
     @State private var errorMessage: String? = nil
     @State private var isSaving = false
 
-    init(vm: PortRelayViewModel, group: GroupItem?, isPresented: Binding<Bool>, onCreated: ((String) -> Void)? = nil,
-         initialName: String = "", initialHosts: String = "", initialPorts: String = "") {
+    init(vm: PortRelayViewModel, group: GroupItem, isPresented: Binding<Bool>) {
         _vm = ObservedObject(wrappedValue: vm)
         self.group = group
-        self.onCreated = onCreated
         _isPresented = isPresented
-        _name = State(initialValue: group?.name ?? initialName)
-        _owner = State(initialValue: group.map { $0.owner ?? "" } ?? NSUserName())
-        _hosts = State(initialValue: initialHosts)
-        _ports = State(initialValue: initialPorts)
+        _name = State(initialValue: group.name)
+        _owner = State(initialValue: group.owner ?? "")
     }
-
-    var isEdit: Bool { group != nil }
 
     /// 可以加入该组的已有通道（不属于任何组）
     var candidates: [TunnelItem] {
         vm.tunnels.filter { ($0.group_id ?? "").isEmpty }
     }
 
-    var hasNewTargets: Bool { !hosts.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-
-    var canSave: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty && !isSaving
-            && (isEdit || hasNewTargets || !moveIDs.isEmpty)
-            && (!hasNewTargets || (previewError == nil && !preview.isEmpty))
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(isEdit ? "编辑通道组" : "新建通道组")
+                Text("编辑通道组")
                     .font(.system(size: 15, weight: .bold))
-                Text("组内地址共用邀请与授权：同事授权一次即可访问整组，组内任一地址在用时整组都不会闲置关闭")
+                Text("组内通道共用邀请与授权：同事授权一次即可访问整组，组内任一地址在用时整组都不会闲置关闭")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
 
             HStack(spacing: 12) {
-                field("通道组名称") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("通道组名称")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                     TextField("例如：订单服务集群", text: $name)
                         .textFieldStyle(.roundedBorder)
                 }
-                field("关联责任人") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("关联责任人")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                     TextField("例如：张三 / 运维组", text: $owner)
                         .textFieldStyle(.roundedBorder)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(isEdit ? "追加目标（可选）" : "目标主机与端口")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                HStack(alignment: .top, spacing: 8) {
-                    TextField("主机：10.0.1.11-13，或 10.0.1.11, 10.0.1.12，也可直接写 主机:端口", text: $hosts)
-                        .textFieldStyle(.roundedBorder)
-                    TextField("端口：22, 8080", text: $ports)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 130)
-                }
-                if let err = previewError, hasNewTargets {
-                    Text(verbatim: err)
-                        .font(.system(size: 11))
-                        .foregroundColor(.red)
-                } else if !preview.isEmpty {
-                    previewList
-                } else {
-                    Text("每个 主机 × 端口 会创建一个通道，并分配一段连续的访问端口")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-            }
-
             if !candidates.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(isEdit ? "把已有通道加入该组（可选）" : "或加入已有通道（可选）")
+                    Text("把已有通道加入该组（可选）")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                     ScrollView {
@@ -3873,51 +4024,13 @@ struct GroupEditSheet: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: min(CGFloat(candidates.count) * 22 + 4, 110))
+                    .frame(maxHeight: min(CGFloat(candidates.count) * 22 + 4, 132))
                 }
             }
 
-            if hasNewTargets {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("新建通道的设置")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                    HStack(spacing: 6) {
-                        Text("闲置关闭")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .frame(width: 56, alignment: .leading)
-                        ForEach(idleCloseOptions, id: \.0) { opt in
-                            DurationChip(title: opt.1, minutes: opt.0, selectedMinutes: $idleCloseMinutes)
-                        }
-                    }
-                    HStack(spacing: 6) {
-                        Text("最长开启")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .frame(width: 56, alignment: .leading)
-                        DurationChip(title: "不限制", minutes: 0, selectedMinutes: $durationMinutes)
-                        DurationChip(title: "2 小时", minutes: 120, selectedMinutes: $durationMinutes)
-                        DurationChip(title: "8 小时", minutes: 480, selectedMinutes: $durationMinutes)
-                        DurationChip(title: "1 天", minutes: 1440, selectedMinutes: $durationMinutes)
-                    }
-                    Picker("", selection: $accessMode) {
-                        Text("仅授权链接（推荐）").tag(TunnelEditSheet.AccessMode.linkOnly)
-                        Text("固定 IP / 网段").tag(TunnelEditSheet.AccessMode.specific)
-                        Text("全部放通 *").tag(TunnelEditSheet.AccessMode.all)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    if accessMode == .specific {
-                        TextField("例如 192.168.1.100, 192.168.1.0/24（逗号分隔）", text: $whitelistString)
-                            .textFieldStyle(.roundedBorder)
-                    } else if accessMode == .all {
-                        Label("任何能访问服务器的设备都可以连接，不建议用于敏感服务。", systemImage: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11))
-                            .foregroundColor(.red)
-                    }
-                }
-            }
+            Text("要开放新的地址，请在通道组卡片上点「添加地址」")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
 
             if let err = errorMessage {
                 Text(verbatim: err)
@@ -3929,90 +4042,29 @@ struct GroupEditSheet: View {
                 Spacer()
                 Button("取消") { isPresented = false }
                     .controlSize(.small)
-                Button(isSaving ? "保存中…" : (isEdit ? "保存" : "创建通道组")) { save() }
+                Button(isSaving ? "保存中…" : "保存") { save() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(!canSave)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || isSaving)
             }
             .padding(.top, 2)
         }
         .padding(20)
-        .frame(width: 560)
-        .task(id: "\(name)|\(hosts)|\(ports)") {
-            // 输入停顿后再预览，避免每敲一个字就请求一次
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            guard !Task.isCancelled else { return }
-            guard hasNewTargets else {
-                preview = []
-                previewError = nil
-                return
-            }
-            let (members, err) = await vm.previewGroup(name: name.isEmpty ? "通道组" : name, hosts: hosts, ports: ports)
-            guard !Task.isCancelled else { return }
-            preview = members
-            previewError = err
-        }
-    }
-
-    var previewList: some View {
-        let shown = preview.prefix(6)
-        return VStack(alignment: .leading, spacing: 3) {
-            ForEach(Array(shown)) { m in
-                HStack(spacing: 6) {
-                    Text(verbatim: "\(vm.publicHost):\(m.listen_port)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(.accentColor)
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 8))
-                        .foregroundColor(.secondary)
-                    Text(verbatim: m.target)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
-            }
-            Text(verbatim: preview.count > shown.count ? "… 共 \(preview.count) 个地址" : "共 \(preview.count) 个地址")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-        }
-    }
-
-    func field<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-            content()
-        }
+        .frame(width: 520)
     }
 
     func save() {
-        var wl: [String] = []
-        switch accessMode {
-        case .linkOnly: wl = []
-        case .all: wl = ["*"]
-        case .specific:
-            wl = whitelistString.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            if hasNewTargets && wl.isEmpty {
-                errorMessage = "请填写允许访问的 IP 或网段，或选择“仅授权链接”"
-                return
-            }
-        }
         isSaving = true
         errorMessage = nil
         Task {
-            let (gid, err) = await vm.saveGroup(
-                id: group?.id, name: name.trimmingCharacters(in: .whitespaces), owner: owner.trimmingCharacters(in: .whitespaces),
-                hosts: hasNewTargets ? hosts : "", ports: hasNewTargets ? ports : "", tunnelIds: Array(moveIDs),
-                whitelist: wl, idleCloseMinutes: idleCloseMinutes, durationMinutes: durationMinutes, maxBandwidthMB: 0)
+            let err = await vm.saveGroup(id: group.id, name: name.trimmingCharacters(in: .whitespaces),
+                                         owner: owner.trimmingCharacters(in: .whitespaces), tunnelIds: Array(moveIDs))
             isSaving = false
             if let err = err {
                 errorMessage = err
                 return
             }
             isPresented = false
-            if !isEdit, accessMode != .all, let gid = gid {
-                onCreated?(gid)
-            }
         }
     }
 }

@@ -15,7 +15,7 @@ var (
 	listSeparators = regexp.MustCompile(`[\s,，、;；]+`)
 	shortRange     = regexp.MustCompile(`^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)(\d{1,3})-(\d{1,3})$`)
 	fullRange      = regexp.MustCompile(`^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$`)
-	hostnameRe     = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+	hostnameRe     = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9._-]*[A-Za-z0-9_])?$`)
 )
 
 func splitList(s string) []string {
@@ -83,11 +83,24 @@ func validHost(h string) bool {
 	return net.ParseIP(h) != nil || hostnameRe.MatchString(h)
 }
 
+// hostsOf expands one host item: an IPv4 range ("10.0.1.11-13") or a single IP / hostname
+func hostsOf(item string) ([]string, error) {
+	hosts, isRange, err := expandIPv4Range(item)
+	if err != nil || isRange {
+		return hosts, err
+	}
+	if !validHost(item) {
+		return nil, fmt.Errorf("无效的主机 %q", item)
+	}
+	return []string{item}, nil
+}
+
 // ExpandTargets turns host and port lists into "host:port" targets, host by host.
 //
 // hosts 用逗号、空格或换行分隔，每一项可以是 IP、主机名、IPv4 范围（"10.0.1.11-13" 或
-// "10.0.1.11-10.0.1.13"），也可以直接写成 "主机:端口"；ports 形如 "22, 8080-8082"，
-// 作用于没有写端口的主机。结果去重并保持输入顺序。
+// "10.0.1.11-10.0.1.13"），也可以直接写成 "主机:端口"（主机和端口都可以是范围，如
+// "10.0.1.11-13:22"、"10.0.1.11:8080-8082"）；ports 形如 "22, 8080-8082"，作用于没有写端口
+// 的主机。结果去重并保持输入顺序。
 func ExpandTargets(hosts, ports string) ([]string, error) {
 	portList, err := parsePorts(ports)
 	if err != nil {
@@ -110,32 +123,23 @@ func ExpandTargets(hosts, ports string) ([]string, error) {
 		return nil, fmt.Errorf("请填写至少一个目标主机")
 	}
 	for _, item := range items {
-		// 自带端口的完整目标："10.0.1.11:22"、"[fd00::1]:22"
+		itemHosts, itemPorts := item, portList
+		// 自带端口的完整目标："10.0.1.11:22"、"10.0.1.11-13:22"、"[fd00::1]:22"
 		if h, p, err := net.SplitHostPort(item); err == nil {
-			n, perr := strconv.Atoi(p)
-			if !validHost(h) || perr != nil || n <= 0 || n > 65535 {
+			if itemPorts, err = parsePorts(p); err != nil || len(itemPorts) == 0 {
 				return nil, fmt.Errorf("无效的目标 %q", item)
 			}
-			if err := add(net.JoinHostPort(h, p)); err != nil {
-				return nil, err
-			}
-			continue
+			itemHosts = h
 		}
-		hostsOfItem, isRange, err := expandIPv4Range(item)
+		hostList, err := hostsOf(itemHosts)
 		if err != nil {
 			return nil, err
 		}
-		if !isRange {
-			if !validHost(item) {
-				return nil, fmt.Errorf("无效的主机 %q", item)
-			}
-			hostsOfItem = []string{item}
+		if len(itemPorts) == 0 {
+			return nil, fmt.Errorf("%q 缺少端口，请写成 主机:端口", item)
 		}
-		if len(portList) == 0 {
-			return nil, fmt.Errorf("请填写端口，或把目标写成 主机:端口")
-		}
-		for _, h := range hostsOfItem {
-			for _, p := range portList {
+		for _, h := range hostList {
+			for _, p := range itemPorts {
 				if err := add(net.JoinHostPort(h, strconv.Itoa(p))); err != nil {
 					return nil, err
 				}

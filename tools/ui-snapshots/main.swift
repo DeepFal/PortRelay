@@ -259,14 +259,15 @@ MainActor.assumeIsolated {
     render("readme-edit", CGSize(width: 490, height: 760), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[0], isPresented: yes))
     let g = demo.groups[0]
     render("group-card", CGSize(width: 980, height: 330), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
-        onEdit: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
+        onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
     render("group-card-dark", CGSize(width: 980, height: 330), dark: true, GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
-        onEdit: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
+        onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
     render("group-card-narrow", CGSize(width: 720, height: 360), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
-        onEdit: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
-    render("group-sheet-new", CGSize(width: 560, height: 640), GroupEditSheet(vm: demo, group: nil, isPresented: yes,
-        initialName: "订单服务", initialHosts: "10.0.3.11-13", initialPorts: "22, 8080"))
-    render("group-sheet-edit", CGSize(width: 560, height: 520), GroupEditSheet(vm: demo, group: g, isPresented: yes))
+        onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
+    render("group-add-batch", CGSize(width: 490, height: 860), TunnelEditSheet(vm: demo, tunnel: nil, isPresented: yes,
+        draftName: "订单服务", draftTarget: "10.0.3.11-13:22, 10.0.3.11-13:8080"))
+    render("group-add-member", CGSize(width: 490, height: 780), TunnelEditSheet(vm: demo, tunnel: nil, isPresented: yes, groupId: g.id))
+    render("group-sheet-edit", CGSize(width: 520, height: 420), GroupEditSheet(vm: demo, group: g, isPresented: yes))
     render("group-invite", CGSize(width: 560, height: 300), InviteSheet(vm: demo, scope: .group(g.id), autoGenerate: true, isPresented: yes))
     render("group-access", CGSize(width: 760, height: 560), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 2, isPresented: yes))
     render("group-online", CGSize(width: 760, height: 400), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 0, isPresented: yes))

@@ -58,7 +58,7 @@ PortRelay turns that into three steps:
 - When approval is required, the app shows a system notification and you approve or deny with one click. The requester's page refreshes on its own.
 - **The access clock starts at the first connection**, so a teammate can accept an invite now and use it later.
 - When access expires or is revoked, **existing connections are dropped too**. Unauthorized connections are reset (TCP RST) and logged.
-- **Tunnel groups** open several hosts and ports at once (for example `10.0.1.11-13` × `22, 8080`) on a contiguous block of gateway ports. A group shares one invite link and one set of grants: a teammate is authorized once for the whole group, and one revoke disconnects them everywhere.
+- **Tunnel groups**: the add-tunnel form accepts several targets at once (for example `10.0.1.11-13:22, 10.0.1.11:8080`), creates one tunnel per address on a contiguous block of gateway ports and puts them in one group. A group shares one invite link and one set of grants: a teammate is authorized once for the whole group, and one revoke disconnects them everywhere.
 
 **Tunnel lifecycle**
 
@@ -221,7 +221,7 @@ Open ⚙️ Settings and fill in:
 2. Keep the default access mode, **仅授权链接** (invite-only). Click **邀请** (Invite), then choose how long access lasts, how many devices may use the link, and whether approval is required.
 3. Send the generated message or QR code. Once the teammate has entered their name, they can connect their database client or SSH to `192.168.1.10:33660`.
 
-To open several hosts at once (a set of servers, say), click **新建通道组** (New tunnel group), enter hosts `10.0.1.11-13` and ports `22`, check the previewed port mapping and create it, then click **邀请整组** (Invite group). Existing tunnels can be ticked to join the group as well.
+To open several hosts at once (a set of servers, say), use the same **添加通道** (Add tunnel) form and enter `10.0.1.11-13:22` as the target. The form previews the port mapping and selects 新建通道组 (New tunnel group); idle close, bandwidth and access settings apply to every address. Then click **邀请整组** (Invite group). To add addresses later, click **添加地址** (Add address) on the group card; an existing tunnel can join a group from its edit form.
 
 ## Configuration
 
