@@ -247,6 +247,7 @@
       background: #1e293b; border: 1px solid var(--card-border);
       border-radius: 16px; width: 520px; max-width: 90vw; padding: 24px;
       box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+      max-height: 90vh; overflow-y: auto;
     }
     .modal-header {
       display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;
@@ -301,6 +302,32 @@
       padding: 24px; display: flex; flex-direction: column;
     }
     .drawer.open { right: 0; }
+
+    /* 通道组 */
+    .group-icon { color: #38bdf8; font-size: 16px; }
+    .group-summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; color: var(--text-muted); }
+    .group-summary .route-endpoint { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; }
+    .member-list { border-top: 1px solid rgba(148, 163, 184, 0.14); margin-bottom: 14px; }
+    .member-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(148, 163, 184, 0.1); font-size: 13px; }
+    .member-row.off { opacity: 0.6; }
+    .member-route { display: flex; align-items: center; gap: 8px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; white-space: nowrap; }
+    .member-route .route-arrow { font-size: 13px; }
+    .member-name { color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+    .member-meta { margin-left: auto; color: var(--text-muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .member-hint { color: var(--text-muted); font-size: 12px; padding: 8px 0; }
+    .member-row .chip { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 5px; cursor: pointer; background: rgba(52, 211, 153, 0.12); color: #34d399; }
+    .mdot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: #64748b; }
+    .mdot.on { background: #34d399; } .mdot.err { background: #f87171; } .mdot.wait { background: #fbbf24; }
+    .member-actions { display: flex; gap: 2px; }
+    .icon-btn { background: none; border: 0; cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 4px; opacity: 0.75; }
+    .icon-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); opacity: 1; }
+    .icon-btn:disabled { opacity: 0.25; cursor: default; }
+    .check-list { max-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .form-group label.check-item { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: normal; color: var(--text); cursor: pointer; }
+    .check-item input { width: auto !important; }
+    .check-item code { color: var(--text-muted); font-size: 12px; }
+    .preview-row { font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+    @media (max-width: 860px) { .member-name, .member-meta { display: none; } }
     .drawer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
     .drawer-content { flex: 1; overflow-y: auto; }
   </style>
@@ -321,6 +348,7 @@
           <div id="statusDot" class="status-dot"></div>
           <span id="statusText">正在连接服务器...</span>
         </div>
+        <button class="btn-secondary" onclick="openGroupModal()" title="一次添加多个主机 / 端口，共用一条邀请链接">▤ 新建通道组</button>
         <button class="btn-primary" onclick="openCreateModal()">+ 新建代理通道</button>
         <button class="btn-secondary" onclick="openSettingsModal()">⚙️ 设置</button>
       </div>
@@ -412,6 +440,10 @@
         <div class="form-group">
           <label>通道名称 / 备注</label>
           <input type="text" id="tunnelName" required placeholder="例如：MySQL 实习库 或 财务系统 SSH">
+        </div>
+        <div class="form-group" id="tunnelGroupWrap" style="display:none;">
+          <label>所属通道组</label>
+          <select id="tunnelGroup"></select>
         </div>
         <div class="form-group">
           <label>目标地址 (中转机 Mac 可直连的内网目标)</label>
@@ -527,6 +559,90 @@
     </div>
   </div>
 
+  <!-- Modal: Tunnel Group -->
+  <div class="modal-overlay" id="groupModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="groupModalTitle">新建通道组</h3>
+        <button class="btn-secondary btn-sm" onclick="closeGroupModal()">✕</button>
+      </div>
+      <form onsubmit="saveGroup(event)">
+        <input type="hidden" id="groupId">
+        <div class="input-hint" style="margin: -8px 0 14px;">组内地址共用邀请与授权：同事授权一次即可访问整组；组内任一地址在用时，整组都不会闲置关闭。</div>
+        <div class="form-group">
+          <label>通道组名称</label>
+          <input type="text" id="groupName" required placeholder="例如：订单服务集群">
+        </div>
+        <div class="form-group">
+          <label>责任人（可选）</label>
+          <input type="text" id="groupOwner" placeholder="例如：张三 / 运维组">
+        </div>
+        <div class="form-group">
+          <label id="groupTargetsLabel">目标主机与端口</label>
+          <div class="input-row">
+            <input type="text" id="groupHosts" placeholder="主机：10.0.1.11-13 或 10.0.1.11, 10.0.1.12（也可写 主机:端口）" oninput="scheduleGroupPreview()">
+            <input type="text" id="groupPorts" style="max-width: 140px;" placeholder="端口：22, 8080" oninput="scheduleGroupPreview()">
+          </div>
+          <div class="input-hint" id="groupPreview"></div>
+        </div>
+        <div class="form-group" id="groupExistingWrap">
+          <label id="groupExistingLabel">或加入已有通道（可选）</label>
+          <div class="check-list" id="groupExisting"></div>
+        </div>
+        <div id="groupNewSettings" style="display:none;">
+          <div class="form-group">
+            <label>新建通道：闲置自动关闭</label>
+            <select id="groupIdleClose">
+              <option value="15">15 分钟</option>
+              <option value="30" selected>30 分钟</option>
+              <option value="60">1 小时</option>
+              <option value="120">2 小时</option>
+              <option value="0">不自动关闭</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>新建通道：最长开启时长</label>
+            <select id="groupMaxDuration">
+              <option value="0" selected>不限制</option>
+              <option value="120">2 小时</option>
+              <option value="480">8 小时</option>
+              <option value="1440">1 天</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>新建通道：访问控制</label>
+            <select id="groupAccessMode" onchange="onGroupAccessModeChange()">
+              <option value="link">仅授权链接（推荐）</option>
+              <option value="specific">固定 IP / 网段 + 授权链接</option>
+              <option value="all">全部放通 *（不安全）</option>
+            </select>
+            <input type="text" id="groupWhitelist" style="margin-top: 8px; display: none;" placeholder="例如 192.168.1.100, 192.168.1.0/24（逗号分隔）">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" onclick="closeGroupModal()">取消</button>
+          <button type="submit" class="btn-primary" id="groupSaveBtn">创建通道组</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Delete Tunnel Group -->
+  <div class="modal-overlay" id="groupDeleteModal">
+    <div class="modal-card" style="width: 460px;">
+      <div class="modal-header">
+        <h3 id="groupDeleteTitle">删除通道组</h3>
+        <button class="btn-secondary btn-sm" onclick="closeGroupDelete()">✕</button>
+      </div>
+      <div class="input-hint" style="font-size: 13px; line-height: 1.7;">组的邀请链接与授权会立即失效。解散后组内通道变回独立通道；删除则一并注销所有端口并断开连接。</div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" onclick="closeGroupDelete()">取消</button>
+        <button type="button" class="btn-secondary" id="groupDissolveBtn" onclick="confirmGroupDelete(false)">解散，保留通道</button>
+        <button type="button" class="btn-danger" onclick="confirmGroupDelete(true)">删除组和全部通道</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: Settings -->
   <div class="modal-overlay" id="settingsModal">
     <div class="modal-card">
@@ -572,6 +688,7 @@
 
   <script>
     let currentTunnels = [];
+    let currentGroups = [];
     let publicHost = '';
     let latestMetrics = null;
 
@@ -661,8 +778,8 @@
       const m = t.metrics || {}, id = escapeHtml(t.id);
       let html = '';
       if (t.max_bandwidth_mb) html += `<span class="chip purple">限速 ${t.max_bandwidth_mb} MB/s</span>`;
-      if ((m.pending || []).length) html += `<span class="chip orange" onclick="openDrawer('${id}')">🔔 待审批 ${m.pending.length}</span>`;
-      if ((m.dynamic_leases || []).length) html += `<span class="chip green" onclick="openDrawer('${id}')">已授权 ${m.dynamic_leases.length} 台 ›</span>`;
+      if ((m.pending || []).length) html += `<span class="chip orange" onclick="openDrawer('t:${id}')">🔔 待审批 ${m.pending.length}</span>`;
+      if ((m.dynamic_leases || []).length) html += `<span class="chip green" onclick="openDrawer('t:${id}')">已授权 ${m.dynamic_leases.length} 台 ›</span>`;
       return html;
     }
 
@@ -718,8 +835,9 @@
 
     async function fetchTunnels() {
       try {
-        const res = await fetch('/api/tunnels');
-        currentTunnels = await res.json();
+        const [tr, gr] = await Promise.all([fetch('/api/tunnels'), fetch('/api/groups')]);
+        currentTunnels = await tr.json();
+        if (gr.ok) currentGroups = await gr.json();
         renderTunnels();
       } catch (e) {
         console.error(e);
@@ -790,70 +908,34 @@
         totalBlocked += (m.blocked_attempts || 0);
       });
       const query = (document.getElementById('tunnelSearch') || {}).value || '';
-      const visible = currentTunnels.filter(t =>
-        (statusFilter === 'all' || (statusFilter === 'running') === !!t.enabled) && tunnelMatches(t, query));
+      const statusOK = t => statusFilter === 'all' || (statusFilter === 'running') === !!t.enabled;
+      // 独立通道与通道组按配置顺序混排：组出现在它第一个成员的位置；组名命中时显示整组
+      const entries = [], seen = new Set();
+      let matched = 0;
+      currentTunnels.forEach(t => {
+        const g = t.group_id && currentGroups.find(x => x.id === t.group_id);
+        if (g) {
+          if (seen.has(g.id)) return;
+          seen.add(g.id);
+          const groupHit = query.trim() !== '' && tunnelMatches({ name: g.name, owner: g.owner, target: '', listen_port: '' }, query);
+          const shown = groupMembers(g).filter(m => statusOK(m) && (groupHit || tunnelMatches(m, query)));
+          if (shown.length) { entries.push(groupCardHtml(g, groupMembers(g), shown)); matched += shown.length; }
+        } else if (statusOK(t) && tunnelMatches(t, query)) {
+          entries.push(tunnelCardHtml(t)); matched++;
+        }
+      });
+      currentGroups.filter(g => !seen.has(g.id) && !(g.tunnel_ids || []).length).forEach(g => {
+        if (statusFilter === 'all' && tunnelMatches({ name: g.name, owner: g.owner, target: '', listen_port: '' }, query)) entries.push(groupCardHtml(g, [], []));
+      });
       const filtering = query.trim() !== '' || statusFilter !== 'all';
       document.getElementById('tunnelCount').innerText = filtering
-        ? `匹配 ${visible.length} / 共 ${currentTunnels.length} 个` : `${currentTunnels.length} 个通道`;
+        ? `匹配 ${matched} / 共 ${currentTunnels.length} 个`
+        : `${currentTunnels.length} 个通道` + (currentGroups.length ? ` · ${currentGroups.length} 个组` : '');
 
-      grid.innerHTML = visible.map(t => {
-        const m = t.metrics || {};
-
-        const badge = {
-          online: ['badge-online', '运行中'],
-          syncing: ['badge-syncing', '同步中'],
-          offline: ['badge-syncing', '等待连接服务器'],
-          error: ['badge-error', '异常'],
-          disabled: ['badge-disabled', '已暂停'],
-        }[t.enabled ? (m.status || 'syncing') : 'disabled'] || ['badge-syncing', '同步中'];
-        const [badgeClass, badgeText] = badge;
-        const errorTitle = m.status === 'error' && m.error ? ` title="${escapeHtml(m.error)}"` : '';
-
-        const sessionBytes = (m.bytes_in || 0) + (m.bytes_out || 0);
-        const histBytes = (t.historical_bytes_in || 0) + (t.historical_bytes_out || 0) + (t.enabled ? sessionBytes : 0);
-
-
-        return `
-          <div class="tunnel-card ${t.enabled ? '' : 'disabled'}">
-            <div class="tunnel-body">
-              <div class="tunnel-info">
-                <div class="tunnel-title-row">
-                  <span class="tunnel-name">${escapeHtml(t.name)}</span>
-                  <span class="badge ${badgeClass}"${errorTitle}>${badgeText}</span>
-                  ${accessPillHtml(t)}
-                </div>
-                ${m.status === 'error' && m.error ? `<div style="color:#f87171; font-size:12px;">⚠️ 服务器注册失败：${escapeHtml(m.error)}</div>` : ''}
-                <div class="route-box">
-                  <span class="route-endpoint">${escapeHtml(publicHost)}:${t.listen_port}</span>
-                  <span class="route-arrow">➔</span>
-                  <span class="route-target">${escapeHtml(t.target)}</span>
-                </div>
-                <div class="lifecycle-row">${lifecycleHtml(t)}${badgeChipsHtml(t)}</div>
-              </div>
-              ${sideHtml(t)}
-            </div>
-
-            <div class="tunnel-bottom">
-              <div class="metrics-summary">
-                <span>连接 <b>${m.active_conns || 0}</b></span>
-                <span>本次 <b>${formatBytes(sessionBytes)}</b></span>
-                <span>历史 <b>${formatBytes(histBytes)}</b></span>
-                ${t.enabled ? `<span class="rate-fallback">速率 <b>↑ ${formatRate(m.rate_in || 0)} ↓ ${formatRate(m.rate_out || 0)}</b></span>` : ''}
-                ${m.blocked_attempts ? `<span style="color: #f87171;">拦截 <b>${m.blocked_attempts}</b></span>` : ''}
-              </div>
-              <div class="tunnel-actions">
-                <button class="btn-primary btn-sm" ${t.enabled ? '' : 'disabled title="请先开启通道"'} onclick="openInviteModal('${escapeHtml(t.id)}')">📨 邀请</button>
-                <button class="btn-secondary btn-sm" onclick="openDrawer('${escapeHtml(t.id)}')">👥 连接与授权</button>
-                <button class="btn-secondary btn-sm" onclick="editTunnel('${escapeHtml(t.id)}')">✏️ 编辑</button>
-                <button class="btn-danger btn-sm" onclick="deleteTunnel('${escapeHtml(t.id)}')">🗑️ 删除</button>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-      if (currentTunnels.length === 0) {
-        grid.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">暂无中继通道，点击上方按钮添加第一个通道</div>';
-      } else if (visible.length === 0) {
+      grid.innerHTML = entries.join('');
+      if (currentTunnels.length === 0 && currentGroups.length === 0) {
+        grid.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-muted);">暂无中继通道，点击上方按钮添加第一个通道；需要一次开放多台主机时，用“新建通道组”</div>';
+      } else if (entries.length === 0) {
         grid.innerHTML = `<div class="tunnel-card" style="text-align:center; padding: 40px; color: var(--text-muted);">
           <div style="font-size: 15px; color: var(--text); margin-bottom: 6px;">没有匹配的通道</div>
           <div style="font-size: 12px; margin-bottom: 12px;">${query.trim() ? '关键字：' + escapeHtml(query.trim()) : ''}${statusFilter !== 'all' ? '　筛选：' + (statusFilter === 'running' ? '运行中' : '已暂停') : ''}</div>
@@ -871,6 +953,62 @@
       document.getElementById('statBlocked').innerText = totalBlocked;
     }
 
+    function tunnelCardHtml(t) {
+      const m = t.metrics || {};
+
+      const badge = {
+        online: ['badge-online', '运行中'],
+        syncing: ['badge-syncing', '同步中'],
+        offline: ['badge-syncing', '等待连接服务器'],
+        error: ['badge-error', '异常'],
+        disabled: ['badge-disabled', '已暂停'],
+      }[t.enabled ? (m.status || 'syncing') : 'disabled'] || ['badge-syncing', '同步中'];
+      const [badgeClass, badgeText] = badge;
+      const errorTitle = m.status === 'error' && m.error ? ` title="${escapeHtml(m.error)}"` : '';
+
+      const sessionBytes = (m.bytes_in || 0) + (m.bytes_out || 0);
+      const histBytes = (t.historical_bytes_in || 0) + (t.historical_bytes_out || 0) + (t.enabled ? sessionBytes : 0);
+
+
+      return `
+        <div class="tunnel-card ${t.enabled ? '' : 'disabled'}">
+          <div class="tunnel-body">
+            <div class="tunnel-info">
+              <div class="tunnel-title-row">
+                <span class="tunnel-name">${escapeHtml(t.name)}</span>
+                <span class="badge ${badgeClass}"${errorTitle}>${badgeText}</span>
+                ${accessPillHtml(t)}
+              </div>
+              ${m.status === 'error' && m.error ? `<div style="color:#f87171; font-size:12px;">⚠️ 服务器注册失败：${escapeHtml(m.error)}</div>` : ''}
+              <div class="route-box">
+                <span class="route-endpoint">${escapeHtml(publicHost)}:${t.listen_port}</span>
+                <span class="route-arrow">➔</span>
+                <span class="route-target">${escapeHtml(t.target)}</span>
+              </div>
+              <div class="lifecycle-row">${lifecycleHtml(t)}${badgeChipsHtml(t)}</div>
+            </div>
+            ${sideHtml(t)}
+          </div>
+
+          <div class="tunnel-bottom">
+            <div class="metrics-summary">
+              <span>连接 <b>${m.active_conns || 0}</b></span>
+              <span>本次 <b>${formatBytes(sessionBytes)}</b></span>
+              <span>历史 <b>${formatBytes(histBytes)}</b></span>
+              ${t.enabled ? `<span class="rate-fallback">速率 <b>↑ ${formatRate(m.rate_in || 0)} ↓ ${formatRate(m.rate_out || 0)}</b></span>` : ''}
+              ${m.blocked_attempts ? `<span style="color: #f87171;">拦截 <b>${m.blocked_attempts}</b></span>` : ''}
+            </div>
+            <div class="tunnel-actions">
+              <button class="btn-primary btn-sm" ${t.enabled ? '' : 'disabled title="请先开启通道"'} onclick="openInviteModal('t:${escapeHtml(t.id)}')">📨 邀请</button>
+              <button class="btn-secondary btn-sm" onclick="openDrawer('t:${escapeHtml(t.id)}')">👥 连接与授权</button>
+              <button class="btn-secondary btn-sm" onclick="editTunnel('${escapeHtml(t.id)}')">✏️ 编辑</button>
+              <button class="btn-danger btn-sm" onclick="deleteTunnel('${escapeHtml(t.id)}')">🗑️ 删除</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
     function setupSSE() {
       const evtSource = new EventSource('/api/stream');
       evtSource.onmessage = (e) => {
@@ -879,6 +1017,7 @@
           renderStatus(data);
 
           // 服务端推送完整通道列表（含开关状态），到期自动关闭等变化也能实时反映
+          if (Array.isArray(data.groups)) currentGroups = data.groups;
           if (Array.isArray(data.tunnels)) {
             currentTunnels = data.tunnels;
             renderTunnels();
@@ -944,6 +1083,7 @@
       document.getElementById('tunnelTarget').value = '';
       setAccessForm([]);
       setLifecycleForm(30, 0);
+      fillTunnelGroupSelect('');
       document.getElementById('probeResult').innerText = '';
       autoRecommendPort();
       document.getElementById('tunnelModal').classList.add('open');
@@ -959,6 +1099,7 @@
       document.getElementById('tunnelPort').value = t.listen_port;
       setAccessForm(t.whitelist || []);
       setLifecycleForm(t.effective_idle_close_minutes ?? 30, t.duration_minutes || 0);
+      fillTunnelGroupSelect(t.group_id || '');
       document.getElementById('probeResult').innerText = '';
       document.getElementById('tunnelModal').classList.add('open');
     }
@@ -1055,7 +1196,8 @@
         listen_port: port,
         whitelist,
         idle_close_minutes: parseInt(document.getElementById('tunnelIdleClose').value, 10),
-        duration_minutes: parseInt(document.getElementById('tunnelMaxDuration').value, 10)
+        duration_minutes: parseInt(document.getElementById('tunnelMaxDuration').value, 10),
+        group_id: document.getElementById('tunnelGroup').value
       };
 
       try {
@@ -1079,7 +1221,7 @@
           const created = await res.json();
           closeTunnelModal();
           await fetchTunnels();
-          setTimeout(() => openInviteModal(created.id, false), 800);
+          setTimeout(() => openInviteModal('t:' + created.id, false), 800);
           return;
         }
         closeTunnelModal();
@@ -1121,19 +1263,50 @@
       await fetchStatus();
     }
 
+    // ---- 授权作用范围：'t:<通道ID>' 或 'g:<通道组ID>'（组内通道共用邀请与授权）----
+    function parseScope(key) {
+      return key.startsWith('g:') ? { group: true, id: key.slice(2) } : { group: false, id: key.startsWith('t:') ? key.slice(2) : key };
+    }
+    function scopeBase(key) {
+      const s = parseScope(key);
+      return (s.group ? '/api/groups/' : '/api/tunnels/') + encodeURIComponent(s.id);
+    }
+    function groupMembers(g) {
+      return (g.tunnel_ids || []).map(id => currentTunnels.find(t => t.id === id)).filter(Boolean);
+    }
+    function scopeInfo(key) {
+      const s = parseScope(key);
+      let name, members, m;
+      if (s.group) {
+        const g = currentGroups.find(x => x.id === s.id);
+        if (!g) return null;
+        name = g.name; members = groupMembers(g); m = g.metrics || {};
+      } else {
+        const t = currentTunnels.find(x => x.id === s.id);
+        if (!t) return null;
+        name = t.name; members = [t]; m = t.metrics || {};
+      }
+      return {
+        group: s.group, name, members, enabled: members.some(t => t.enabled),
+        leases: m.dynamic_leases || [], invites: m.invites || [], pending: m.pending || [],
+      };
+    }
+
     // Drawer
-    let drawerTunnelId = null;
-    function openDrawer(tunnelId) {
-      const t = currentTunnels.find(item => item.id === tunnelId);
-      drawerTunnelId = tunnelId;
-      document.getElementById('drawerTitle').innerText = `${t ? t.name : ''} - 连接与授权`;
+    let drawerScope = null;
+    function openDrawer(key) {
+      if (!key.includes(':')) key = 't:' + key;
+      const info = scopeInfo(key);
+      drawerScope = key;
+      document.getElementById('drawerTitle').innerText = info
+        ? `${info.name}${info.group ? `（${info.members.length} 个地址）` : ''} - 连接与授权` : '连接与授权';
       renderDrawerClients();
       document.getElementById('clientDrawer').classList.add('open');
     }
 
     function closeDrawer() {
       document.getElementById('clientDrawer').classList.remove('open');
-      drawerTunnelId = null;
+      drawerScope = null;
     }
 
     const cardStyle = 'background: rgba(15, 23, 42, 0.7); border: 1px solid var(--card-border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap: 10px;';
@@ -1145,13 +1318,11 @@
       return d.toDateString() === new Date().toDateString() ? `${hm}:${pad2(d.getSeconds())}` : `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${hm}`;
     };
 
-    function renderLeases(t) {
-      if (!t) return { pending: '', auth: '' };
-      const m = t.metrics || {};
-      const leases = m.dynamic_leases || [];
-      const pending = m.pending || [];
-      const invites = m.invites || [];
-      const id = escapeHtml(t.id);
+    function renderLeases(key) {
+      const info = scopeInfo(key);
+      if (!info) return { pending: '', auth: '' };
+      const { leases, pending, invites } = info;
+      const k = escapeHtml(key);
       let html = '';
 
       if (pending.length) {
@@ -1161,8 +1332,8 @@
             <div><b>${escapeHtml(r.name)}</b> <code style="color:#38bdf8;">${escapeHtml(r.ip)}</code>
               <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">申请于 ${fmtDT(r.at)} · 批准后可访问 ${leaseTitle((invites.find(i => i.code === r.invite) || {}).lease_duration)}</div></div>
             <div class="drawer-row-actions">
-              <button class="btn-secondary btn-sm" onclick="decideRequest('${id}', '${escapeHtml(r.id)}', false)">拒绝</button>
-              <button class="btn-primary btn-sm" onclick="decideRequest('${id}', '${escapeHtml(r.id)}', true)">批准</button>
+              <button class="btn-secondary btn-sm" onclick="decideRequest('${k}', '${escapeHtml(r.id)}', false)">拒绝</button>
+              <button class="btn-primary btn-sm" onclick="decideRequest('${k}', '${escapeHtml(r.id)}', true)">批准</button>
             </div>
           </div>`).join('');
       }
@@ -1173,10 +1344,13 @@
         <div style="display:flex; justify-content:space-between; align-items:center; margin: 14px 0 10px;">
           <b style="font-size:13px;">已授权设备 (${leases.length})</b>
           <div style="display:flex; gap:6px;">
-            ${t.enabled ? `<button class="btn-primary btn-sm" onclick="openInviteModal('${id}')">新建邀请</button>` : ''}
-            ${leases.length ? `<button class="btn-danger btn-sm" onclick="revokeLease('${id}', '')">全部撤销</button>` : ''}
+            ${info.enabled ? `<button class="btn-primary btn-sm" onclick="openInviteModal('${k}')">新建邀请</button>` : ''}
+            ${leases.length ? `<button class="btn-danger btn-sm" onclick="revokeLease('${k}', '')">全部撤销</button>` : ''}
           </div>
         </div>`;
+      if (info.group) {
+        html += '<div style="color: var(--text-muted); font-size: 12px; margin: -4px 0 10px;">组内所有地址共用邀请与授权：同事授权一次即可访问整组，计时从首次连上任一地址开始。</div>';
+      }
       html += leases.length === 0
         ? '<div style="color: var(--text-muted); font-size: 12px; margin-bottom: 14px;">暂无。点击“新建邀请”把链接发给同事，对方打开并填写姓名后即可访问。</div>'
         : leases.map(l => {
@@ -1187,7 +1361,7 @@
                   <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">${l.awaiting_connect
                     ? `已授权，尚未连接 · 首次连接后可访问 ${leaseTitle(l.duration)} · 请在 ${fmtDT(l.expires_at)} 前连接`
                     : `${l.started_at ? '首次连接 ' + fmtDT(l.started_at) + ' · ' : ''}有效期至 ${fmtDT(l.expires_at)} · 剩余约 ${mins} 分钟`}</div></div>
-                <button class="btn-danger btn-sm" onclick="revokeLease('${id}', '${escapeHtml(l.ip)}')">撤销</button>
+                <button class="btn-danger btn-sm" onclick="revokeLease('${k}', '${escapeHtml(l.ip)}')">撤销</button>
               </div>`;
           }).join('');
 
@@ -1203,16 +1377,16 @@
                 <div><b>${inv.note ? '给 ' + escapeHtml(inv.note) : '未备注的邀请'}</b>
                   <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">${opts}<br>链接有效至 ${fmtDT(inv.expires_at)} · 已使用 ${usage}${used.length ? '（' + used.map(u => escapeHtml(u.name)).join('、') + '）' : ''}</div></div>
                 <div class="drawer-row-actions">
-                  <button class="btn-secondary btn-sm" onclick="copyInviteShare('${id}', '${escapeHtml(inv.code)}')">复制文案</button>
-                  <button class="btn-danger btn-sm" onclick="revokeInvite('${id}', '${escapeHtml(inv.code)}')">作废</button>
+                  <button class="btn-secondary btn-sm" onclick="copyInviteShare('${k}', '${escapeHtml(inv.code)}')">复制文案</button>
+                  <button class="btn-danger btn-sm" onclick="revokeInvite('${k}', '${escapeHtml(inv.code)}')">作废</button>
                 </div>
               </div>`;
           }).join('');
       return { pending: pendingHtml, auth: html + '<div style="height: 10px;"></div>' };
     }
 
-    async function decideRequest(tunnelId, requestId, approve) {
-      const res = await fetch(`/api/tunnels/${encodeURIComponent(tunnelId)}/requests/${encodeURIComponent(requestId)}`, {
+    async function decideRequest(key, requestId, approve) {
+      const res = await fetch(`${scopeBase(key)}/requests/${encodeURIComponent(requestId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approve })
@@ -1220,9 +1394,9 @@
       if (!res.ok) alert('操作失败: ' + await apiError(res));
     }
 
-    async function revokeInvite(tunnelId, code) {
+    async function revokeInvite(key, code) {
       if (!confirm('作废该邀请链接？通过它获得的访问权限也会被收回。')) return;
-      const res = await fetch(`/api/tunnels/${encodeURIComponent(tunnelId)}/invites/${encodeURIComponent(code)}`, { method: 'DELETE' });
+      const res = await fetch(`${scopeBase(key)}/invites/${encodeURIComponent(code)}`, { method: 'DELETE' });
       if (!res.ok) alert('作废失败: ' + await apiError(res));
     }
 
@@ -1236,19 +1410,22 @@
       }
     }
 
-    async function copyInviteShare(tunnelId, code) {
-      const res = await fetch(`/api/tunnels/${encodeURIComponent(tunnelId)}/invites/${encodeURIComponent(code)}/share`);
+    async function copyInviteShare(key, code) {
+      const res = await fetch(`${scopeBase(key)}/invites/${encodeURIComponent(code)}/share`);
       if (!res.ok) { alert('获取失败: ' + await apiError(res)); return; }
       const data = await res.json();
       if (await copyText(data.share_text)) alert('分享文案已复制');
     }
 
-    // Invite modal
-    let inviteTunnelId = null;
-    function openInviteModal(tunnelId, autoGenerate) {
-      const t = currentTunnels.find(item => item.id === tunnelId);
-      inviteTunnelId = tunnelId;
-      document.getElementById('inviteTitle').innerText = `邀请访问「${t ? t.name : ''}」`;
+    // Invite modal（通道或通道组）
+    let inviteScope = null;
+    function openInviteModal(key, autoGenerate) {
+      if (!key.includes(':')) key = 't:' + key;
+      const info = scopeInfo(key);
+      inviteScope = key;
+      document.getElementById('inviteTitle').innerText = info
+        ? (info.group ? `邀请访问「${info.name}」（${info.members.filter(t => t.enabled).length} 个地址）` : `邀请访问「${info.name}」`)
+        : '邀请访问';
       resetInviteModal();
       document.getElementById('inviteModal').classList.add('open');
       if (autoGenerate) generateInvite();
@@ -1256,7 +1433,7 @@
 
     function closeInviteModal() {
       document.getElementById('inviteModal').classList.remove('open');
-      inviteTunnelId = null;
+      inviteScope = null;
     }
 
     function resetInviteModal() {
@@ -1268,8 +1445,8 @@
     }
 
     async function generateInvite() {
-      if (!inviteTunnelId) return;
-      const res = await fetch(`/api/tunnels/${encodeURIComponent(inviteTunnelId)}/invites`, {
+      if (!inviteScope) return;
+      const res = await fetch(`${scopeBase(inviteScope)}/invites`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1282,7 +1459,9 @@
       });
       if (!res.ok) { alert('生成失败: ' + await apiError(res)); return; }
       const data = await res.json();
-      document.getElementById('inviteShareText').value = data.share_text;
+      const box = document.getElementById('inviteShareText');
+      box.value = data.share_text;
+      box.rows = Math.min(16, Math.max(8, data.share_text.split('\n').length + 2));
       document.getElementById('inviteCopyText').onclick = async () => { if (await copyText(data.share_text)) document.getElementById('inviteCopyText').innerText = '已复制'; };
       document.getElementById('inviteCopyLink').onclick = async () => { if (await copyText(data.link)) document.getElementById('inviteCopyLink').innerText = '已复制'; };
       document.getElementById('inviteCopyText').innerText = '复制分享文案';
@@ -1291,9 +1470,9 @@
       document.getElementById('inviteResult').style.display = 'block';
     }
 
-    async function revokeLease(tunnelId, ip) {
-      if (!confirm(ip ? `撤销 ${ip} 的访问权限？该设备的连接会被立即断开。` : '撤销该通道全部已授权设备？')) return;
-      const res = await fetch(`/api/tunnels/${encodeURIComponent(tunnelId)}/leases/revoke`, {
+    async function revokeLease(key, ip) {
+      if (!confirm(ip ? `撤销 ${ip} 的访问权限？该设备的连接会被立即断开。` : '撤销全部已授权设备？')) return;
+      const res = await fetch(`${scopeBase(key)}/leases/revoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ip })
@@ -1302,13 +1481,17 @@
     }
 
     function renderDrawerClients() {
-      if (!drawerTunnelId) return;
-      const list = ((latestMetrics && latestMetrics.active_conns) || []).filter(c => c.tunnel_id === drawerTunnelId);
+      if (!drawerScope) return;
+      const info = scopeInfo(drawerScope);
+      if (!info) return;
+      const memberIds = new Set(info.members.map(t => t.id));
+      const targetOf = new Map(info.members.map(t => [t.id, t.target]));
+      const list = ((latestMetrics && latestMetrics.active_conns) || []).filter(c => memberIds.has(c.tunnel_id));
       const container = document.getElementById('drawerClientsList');
-      const parts = renderLeases(currentTunnels.find(item => item.id === drawerTunnelId));
+      const parts = renderLeases(drawerScope);
 
       if (list.length === 0) {
-        container.innerHTML = parts.pending + '<b style="font-size:13px; display:block; margin-bottom:10px;">在线连接 (0)</b><div style="text-align: center; color: var(--text-muted); padding: 16px 0 6px; font-size: 13px;">当前暂无客户端连接此端口</div>' + parts.auth;
+        container.innerHTML = parts.pending + '<b style="font-size:13px; display:block; margin-bottom:10px;">在线连接 (0)</b><div style="text-align: center; color: var(--text-muted); padding: 16px 0 6px; font-size: 13px;">当前暂无客户端连接</div>' + parts.auth;
         return;
       }
 
@@ -1319,8 +1502,7 @@
         const ip = m ? m[1] : c.client_ip;
         (groups[ip] = groups[ip] || []).push(c);
       });
-      const tunnel = currentTunnels.find(item => item.id === drawerTunnelId);
-      const leaseNames = new Map(((tunnel && tunnel.metrics && tunnel.metrics.dynamic_leases) || []).map(l => [l.ip, l.name || '']));
+      const leaseNames = new Map(info.leases.map(l => [l.ip, l.name || '']));
       const sum = (arr, k) => arr.reduce((a, c) => a + (c[k] || 0), 0);
       const ips = Object.keys(groups).sort((x, y) => groups[y].length - groups[x].length || x.localeCompare(y));
 
@@ -1328,6 +1510,7 @@
         const conns = groups[ip];
         const first = conns.map(c => new Date(c.connected_at)).sort((x, y) => x - y)[0];
         const ids = conns.map(c => c.conn_id);
+        const targets = [...new Set(conns.map(c => targetOf.get(c.tunnel_id)))].filter(Boolean);
         return `
           <div style="background: rgba(15, 23, 42, 0.7); border: 1px solid var(--card-border); border-radius: 8px; padding: 14px; margin-bottom: 12px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -1340,12 +1523,331 @@
             </div>
             <div style="font-size: 12px; color: var(--text-muted); line-height: 1.6;">
               <div>最早接入: ${first ? fmtDT(first) : '-'}</div>
+              ${info.group ? `<div>访问目标: <code>${targets.map(escapeHtml).join('、')}</code></div>` : ''}
               <div>传输流量: 上行 ${formatBytes(sum(conns, 'bytes_in'))} / 下行 ${formatBytes(sum(conns, 'bytes_out'))}</div>
               <div>当前速率: ↑ ${formatRate(sum(conns, 'rate_in'))} / ↓ ${formatRate(sum(conns, 'rate_out'))}</div>
             </div>
           </div>
         `;
       }).join('') + parts.auth;
+    }
+
+    // ---- 通道组卡片 ----
+    const sumOf = (arr, f) => arr.reduce((a, x) => a + (f(x) || 0), 0);
+
+    function groupStatus(members) {
+      const on = members.filter(t => t.enabled);
+      if (!members.length) return ['badge-disabled', '暂无通道'];
+      if (!on.length) return ['badge-disabled', '已暂停'];
+      if (on.some(t => (t.metrics || {}).status === 'error')) return ['badge-error', '部分异常'];
+      if (on.some(t => (t.metrics || {}).status === 'offline')) return ['badge-syncing', '等待连接服务器'];
+      if (on.length < members.length) return ['badge-syncing', `${on.length}/${members.length} 运行中`];
+      return ['badge-online', '运行中'];
+    }
+
+    function groupAccessPill(members) {
+      if (!members.length) return '';
+      if (members.some(t => (t.whitelist || []).includes('*'))) return '<span class="access-pill all">⚠️ 含全部放通 *</span>';
+      const kinds = new Set(members.map(t => [...(t.whitelist || [])].sort().join(',')));
+      if (kinds.size > 1) return '<span class="access-pill fixed">成员访问方式不同</span>';
+      return (members[0].whitelist || []).length === 0 ? '<span class="access-pill">🔒 仅授权链接</span>' : '<span class="access-pill fixed">白名单 + 授权链接</span>';
+    }
+
+    function portRangeText(members) {
+      const ports = members.map(t => t.listen_port).sort((a, b) => a - b);
+      if (!ports.length) return '';
+      if (ports.length === 1) return String(ports[0]);
+      return ports[ports.length - 1] - ports[0] + 1 === ports.length ? `${ports[0]}–${ports[ports.length - 1]}` : ports.join(', ');
+    }
+
+    function groupLifecycleHtml(g, members) {
+      const on = members.filter(t => t.enabled);
+      const parts = [];
+      if (on.length) {
+        const min = arr => arr.filter(Boolean).sort()[0];
+        parts.push(`<span>开启 ${fmtDT(min(on.map(t => t.started_at)))}</span>`);
+        const first = min(on.map(t => t.first_connected_at));
+        parts.push(`<span>${first ? '首次连接 ' + fmtDT(first) : '尚无连接'}</span>`);
+        parts.push(`<span class="strong" title="组内连接在线时间最长的一个地址的累计时长">实际连接 ${fmtSecs(Math.max(...on.map(t => t.activity ? t.activity.connected_sec : (t.connected_sec || 0))))}</span>`);
+        const acts = on.map(t => t.activity).filter(Boolean);
+        if (acts.some(a => a.in_use)) {
+          parts.push('<span class="ok" title="组内有在线连接、有效授权、待审批申请或可用的邀请链接">● 使用中</span>');
+        } else if (acts.length) {
+          const act = acts.filter(a => a.auto_close_at).sort((a, b) => a.auto_close_at.localeCompare(b.auto_close_at))[0];
+          if (act) {
+            const left = -ago(act.auto_close_at);
+            parts.push(`<span class="${left < 300 ? 'warn' : ''}">已闲置 ${fmtSecs(ago(act.idle_since))}，${fmtSecs(left)} 后整组自动关闭</span>`);
+          } else {
+            parts.push(`<span>已闲置 ${fmtSecs(ago(acts[0].idle_since))}（不自动关闭）</span>`);
+          }
+        }
+        const exp = min(on.map(t => t.expires_at));
+        if (exp) parts.push(`<span>最长开启至 ${fmtDT(exp)}</span>`);
+      } else if (members.length) {
+        if (members[0].close_reason) parts.push(`<span>关闭原因：${escapeHtml(members[0].close_reason)}</span>`);
+        const idle = members[0].effective_idle_close_minutes ?? 30;
+        parts.push(`<span>闲置自动关闭：${idle > 0 ? fmtMinutes(idle) : '关'}</span>`);
+      }
+      const m = g.metrics || {}, key = escapeHtml('g:' + g.id);
+      if ((m.pending || []).length) parts.push(`<span class="chip orange" onclick="openDrawer('${key}')">🔔 待审批 ${m.pending.length}</span>`);
+      if ((m.dynamic_leases || []).length) parts.push(`<span class="chip green" onclick="openDrawer('${key}')">已授权 ${m.dynamic_leases.length} 台 ›</span>`);
+      return parts.join('');
+    }
+
+    function memberRowHtml(g, t) {
+      const m = t.metrics || {}, id = escapeHtml(t.id);
+      const dot = !t.enabled ? 'off' : (m.status === 'online' ? 'on' : (m.status === 'error' ? 'err' : 'wait'));
+      const own = (m.dynamic_leases || []).length + (m.pending || []).length;
+      // 批量创建的成员按“组名 (主机)”自动命名，不重复显示；加入组的已有通道保留原名
+      const custom = !t.name.startsWith(g.name + ' (');
+      return `
+        <div class="member-row ${t.enabled ? '' : 'off'}">
+          <span class="mdot ${dot}" title="${t.enabled ? escapeHtml(m.error || '运行中') : '已关闭'}"></span>
+          <span class="member-route"><span class="route-endpoint">${escapeHtml(publicHost)}:${t.listen_port}</span><span class="route-arrow">➔</span><span class="route-target">${escapeHtml(t.target)}</span></span>
+          ${custom ? `<span class="member-name">${escapeHtml(t.name)}</span>` : ''}
+          ${own ? `<span class="chip green" onclick="openDrawer('t:${id}')">单独授权 ${own}</span>` : ''}
+          <span class="member-meta">${m.active_conns ? m.active_conns + ' 连接 · ' : ''}${t.enabled ? `↑ ${formatRate(m.rate_in || 0)} ↓ ${formatRate(m.rate_out || 0)}` : '已关闭'}</span>
+          <label class="switch mini" title="${t.enabled ? '单独关闭这个地址' : '单独开启这个地址'}">
+            <input type="checkbox" ${t.enabled ? 'checked' : ''} onchange="toggleTunnel('${id}', this.checked)">
+            <span class="slider"></span>
+          </label>
+          <span class="member-actions">
+            <button class="icon-btn" title="单独邀请这个地址" ${t.enabled ? '' : 'disabled'} onclick="openInviteModal('t:${id}')">📨</button>
+            <button class="icon-btn" title="连接与授权" onclick="openDrawer('t:${id}')">👥</button>
+            <button class="icon-btn" title="编辑" onclick="editTunnel('${id}')">✏️</button>
+            <button class="icon-btn" title="移出通道组" onclick="moveOutOfGroup('${id}')">⤴️</button>
+            <button class="icon-btn" title="删除" onclick="deleteTunnel('${id}')">🗑️</button>
+          </span>
+        </div>`;
+    }
+
+    function groupCardHtml(g, members, shown) {
+      const on = members.filter(t => t.enabled), gid = escapeHtml(g.id), key = escapeHtml('g:' + g.id);
+      const [badgeClass, badgeText] = groupStatus(members);
+      const rateIn = sumOf(on, t => (t.metrics || {}).rate_in), rateOut = sumOf(on, t => (t.metrics || {}).rate_out);
+      const session = sumOf(on, t => ((t.metrics || {}).bytes_in || 0) + ((t.metrics || {}).bytes_out || 0));
+      const history = sumOf(members, t => (t.historical_bytes_in || 0) + (t.historical_bytes_out || 0)) + session;
+      const s = g.rate_history, peak = s ? Math.max(0, ...s.down, ...s.up) : 0;
+      const toggle = `<label class="switch mini" title="${on.length ? '关闭整组' : '开启整组'}">
+          <input type="checkbox" ${on.length ? 'checked' : ''} ${members.length ? '' : 'disabled'} onchange="toggleGroup('${gid}', this.checked)">
+          <span class="slider"></span>
+        </label>`;
+      const side = on.length ? `<div class="tunnel-side with-chart">
+          <div class="side-top">
+            <div class="traffic-legend">
+              <span><i style="background:${DOWN_COLOR}"></i>↓ ${formatRate(rateOut)}</span>
+              <span><i style="background:${UP_COLOR}"></i>↑ ${formatRate(rateIn)}</span>
+            </div>
+            ${toggle}
+          </div>
+          <div class="traffic-panel">
+            <div class="traffic-chart">${peak ? sparkSVG(s, 260, 46, 'g' + gid) : '<div class="empty">近 10 分钟无流量</div>'}</div>
+            <div class="traffic-foot"><span>近 10 分钟</span><span>${peak ? '峰值 ' + formatRate(peak) : ''}</span></div>
+          </div>
+        </div>` : `<div class="tunnel-side"><div class="side-top">${toggle}</div></div>`;
+      const hidden = members.length - shown.length;
+      return `
+        <div class="tunnel-card group-card ${on.length || !members.length ? '' : 'disabled'}">
+          <div class="tunnel-body">
+            <div class="tunnel-info">
+              <div class="tunnel-title-row">
+                <span class="group-icon" title="通道组">▤</span>
+                <span class="tunnel-name">${escapeHtml(g.name)}</span>
+                <span class="badge ${badgeClass}">${badgeText}</span>
+                ${groupAccessPill(members)}
+              </div>
+              <div class="group-summary">
+                <span>${members.length} 个地址</span>
+                ${members.length ? `<span class="route-endpoint">${escapeHtml(publicHost)}:${portRangeText(members)}</span>
+                <button class="btn-secondary btn-sm" onclick="copyGroupAddresses('${gid}')">复制全部地址</button>` : ''}
+              </div>
+              <div class="lifecycle-row">${groupLifecycleHtml(g, members)}</div>
+            </div>
+            ${side}
+          </div>
+          <div class="member-list">
+            ${shown.map(t => memberRowHtml(g, t)).join('')}
+            ${hidden > 0 ? `<div class="member-hint">已按搜索 / 筛选隐藏 ${hidden} 个地址</div>` : ''}
+            ${!members.length ? '<div class="member-hint">组内暂无通道，点击“编辑”添加目标或把已有通道加入该组</div>' : ''}
+          </div>
+          <div class="tunnel-bottom">
+            <div class="metrics-summary">
+              <span>连接 <b>${sumOf(on, t => (t.metrics || {}).active_conns)}</b></span>
+              <span>本次 <b>${formatBytes(session)}</b></span>
+              <span>历史 <b>${formatBytes(history)}</b></span>
+              ${on.length ? `<span class="rate-fallback">速率 <b>↑ ${formatRate(rateIn)} ↓ ${formatRate(rateOut)}</b></span>` : ''}
+            </div>
+            <div class="tunnel-actions">
+              <button class="btn-primary btn-sm" ${on.length ? '' : 'disabled title="请先开启通道组"'} onclick="openInviteModal('${key}')">📨 邀请整组</button>
+              <button class="btn-secondary btn-sm" onclick="openDrawer('${key}')">👥 连接与授权</button>
+              <button class="btn-secondary btn-sm" onclick="openGroupModal('${gid}')">✏️ 编辑</button>
+              <button class="btn-danger btn-sm" onclick="openGroupDelete('${gid}')">🗑️ 删除</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    async function copyGroupAddresses(groupId) {
+      const g = currentGroups.find(x => x.id === groupId);
+      if (!g) return;
+      const text = groupMembers(g).map(t => `${publicHost}:${t.listen_port} → ${t.target}`).join('\n');
+      if (await copyText(text)) alert('已复制全部访问地址');
+    }
+
+    async function toggleGroup(id, enabled) {
+      const res = await fetch(`/api/groups/${encodeURIComponent(id)}/toggle`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled })
+      });
+      if (!res.ok) alert('操作失败: ' + await apiError(res));
+      await fetchTunnels();
+    }
+
+    async function moveOutOfGroup(id) {
+      const res = await fetch(`/api/tunnels/${encodeURIComponent(id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: '' })
+      });
+      if (!res.ok) alert('操作失败: ' + await apiError(res));
+      await fetchTunnels();
+    }
+
+    // ---- 新建 / 编辑通道组 ----
+    let groupPreviewTimer = null, groupPreviewOK = false;
+
+    function openGroupModal(id) {
+      const g = id ? currentGroups.find(x => x.id === id) : null;
+      document.getElementById('groupModalTitle').innerText = g ? '编辑通道组' : '新建通道组';
+      document.getElementById('groupSaveBtn').innerText = g ? '保存' : '创建通道组';
+      document.getElementById('groupTargetsLabel').innerText = g ? '追加目标（可选）' : '目标主机与端口';
+      document.getElementById('groupId').value = g ? g.id : '';
+      document.getElementById('groupName').value = g ? g.name : '';
+      document.getElementById('groupOwner').value = g ? (g.owner || '') : '';
+      document.getElementById('groupHosts').value = '';
+      document.getElementById('groupPorts').value = '';
+      document.getElementById('groupIdleClose').value = '30';
+      document.getElementById('groupMaxDuration').value = '0';
+      document.getElementById('groupAccessMode').value = 'link';
+      document.getElementById('groupWhitelist').value = '';
+      onGroupAccessModeChange();
+      const free = currentTunnels.filter(t => !t.group_id);
+      document.getElementById('groupExistingWrap').style.display = free.length ? 'block' : 'none';
+      document.getElementById('groupExistingLabel').innerText = g ? '把已有通道加入该组（可选）' : '或加入已有通道（可选）';
+      document.getElementById('groupExisting').innerHTML = free.map(t => `
+        <label class="check-item"><input type="checkbox" value="${escapeHtml(t.id)}">
+          <span>${escapeHtml(t.name)}</span><code>:${t.listen_port} → ${escapeHtml(t.target)}</code></label>`).join('');
+      renderGroupPreview(null);
+      document.getElementById('groupModal').classList.add('open');
+    }
+
+    function closeGroupModal() {
+      document.getElementById('groupModal').classList.remove('open');
+    }
+
+    function onGroupAccessModeChange() {
+      const mode = document.getElementById('groupAccessMode').value;
+      document.getElementById('groupWhitelist').style.display = mode === 'specific' ? 'block' : 'none';
+    }
+
+    function renderGroupPreview(result) {
+      const box = document.getElementById('groupPreview');
+      const hasHosts = document.getElementById('groupHosts').value.trim() !== '';
+      document.getElementById('groupNewSettings').style.display = hasHosts ? 'block' : 'none';
+      groupPreviewOK = !hasHosts;
+      if (!hasHosts || !result) {
+        box.innerHTML = '每个 主机 × 端口 会创建一个通道，并分配一段连续的访问端口';
+        box.style.color = '';
+        return;
+      }
+      if (result.error) {
+        box.innerText = result.error;
+        box.style.color = 'var(--danger)';
+        return;
+      }
+      groupPreviewOK = result.members.length > 0;
+      box.style.color = '';
+      const shown = result.members.slice(0, 6);
+      box.innerHTML = shown.map(m => `<div class="preview-row"><span class="route-endpoint">${escapeHtml(publicHost)}:${m.listen_port}</span> <span class="route-arrow">➔</span> <span class="route-target">${escapeHtml(m.target)}</span></div>`).join('')
+        + `<div>${result.members.length > shown.length ? '… ' : ''}共 ${result.members.length} 个地址</div>`;
+    }
+
+    function scheduleGroupPreview() {
+      clearTimeout(groupPreviewTimer);
+      groupPreviewTimer = setTimeout(async () => {
+        const hosts = document.getElementById('groupHosts').value;
+        if (!hosts.trim()) { renderGroupPreview(null); return; }
+        try {
+          const res = await fetch('/api/groups/preview', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: document.getElementById('groupName').value.trim() || '通道组', hosts, ports: document.getElementById('groupPorts').value })
+          });
+          renderGroupPreview(res.ok ? await res.json() : { error: await apiError(res) });
+        } catch (e) {
+          renderGroupPreview({ error: '预览失败：' + e.message });
+        }
+      }, 300);
+    }
+
+    async function saveGroup(e) {
+      e.preventDefault();
+      const id = document.getElementById('groupId').value;
+      const hosts = document.getElementById('groupHosts').value.trim();
+      const tunnelIds = [...document.querySelectorAll('#groupExisting input:checked')].map(i => i.value);
+      if (!id && !hosts && !tunnelIds.length) { alert('请填写目标主机与端口，或选择要加入的已有通道'); return; }
+      if (hosts && !groupPreviewOK) { alert('请先修正目标主机与端口'); return; }
+      const mode = document.getElementById('groupAccessMode').value;
+      let whitelist = [];
+      if (mode === 'all') whitelist = ['*'];
+      if (mode === 'specific') {
+        whitelist = document.getElementById('groupWhitelist').value.split(',').map(s => s.trim()).filter(Boolean);
+        if (hosts && !whitelist.length) { alert('请填写允许访问的 IP 或网段，或选择“仅授权链接”'); return; }
+      }
+      const payload = {
+        name: document.getElementById('groupName').value.trim(),
+        owner: document.getElementById('groupOwner').value.trim(),
+        hosts, ports: hosts ? document.getElementById('groupPorts').value : '',
+        tunnel_ids: tunnelIds, whitelist,
+        idle_close_minutes: parseInt(document.getElementById('groupIdleClose').value, 10),
+        duration_minutes: parseInt(document.getElementById('groupMaxDuration').value, 10),
+      };
+      const res = await fetch(id ? `/api/groups/${encodeURIComponent(id)}` : '/api/groups', {
+        method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      });
+      if (!res.ok) { alert('保存失败: ' + await apiError(res)); return; }
+      const data = await res.json();
+      closeGroupModal();
+      await fetchTunnels();
+      // 新建通道组后直接打开整组的邀请设置
+      if (!id && mode !== 'all' && data.group) setTimeout(() => openInviteModal('g:' + data.group.id, false), 800);
+    }
+
+    // ---- 删除 / 解散通道组 ----
+    let groupToDelete = null;
+    function openGroupDelete(id) {
+      const g = currentGroups.find(x => x.id === id);
+      if (!g) return;
+      groupToDelete = id;
+      document.getElementById('groupDeleteTitle').innerText = `删除通道组「${g.name}」？`;
+      document.getElementById('groupDissolveBtn').innerText = `解散，保留 ${groupMembers(g).length} 个通道`;
+      document.getElementById('groupDeleteModal').classList.add('open');
+    }
+
+    function closeGroupDelete() {
+      document.getElementById('groupDeleteModal').classList.remove('open');
+      groupToDelete = null;
+    }
+
+    async function confirmGroupDelete(withMembers) {
+      if (!groupToDelete) return;
+      const res = await fetch(`/api/groups/${encodeURIComponent(groupToDelete)}${withMembers ? '?delete_members=1' : ''}`, { method: 'DELETE' });
+      if (!res.ok) alert('删除失败: ' + await apiError(res));
+      closeGroupDelete();
+      await fetchTunnels();
+    }
+
+    function fillTunnelGroupSelect(selected) {
+      const wrap = document.getElementById('tunnelGroupWrap');
+      wrap.style.display = currentGroups.length ? 'block' : 'none';
+      document.getElementById('tunnelGroup').innerHTML = '<option value="">不属于任何组</option>' +
+        currentGroups.map(g => `<option value="${escapeHtml(g.id)}" ${g.id === selected ? 'selected' : ''}>${escapeHtml(g.name)}</option>`).join('');
     }
 
     async function killConns(ids) {

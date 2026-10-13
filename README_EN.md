@@ -58,11 +58,13 @@ PortRelay turns that into three steps:
 - When approval is required, the app shows a system notification and you approve or deny with one click. The requester's page refreshes on its own.
 - **The access clock starts at the first connection**, so a teammate can accept an invite now and use it later.
 - When access expires or is revoked, **existing connections are dropped too**. Unauthorized connections are reset (TCP RST) and logged.
+- **Tunnel groups** open several hosts and ports at once (for example `10.0.1.11-13` × `22, 8080`) on a contiguous block of gateway ports. A group shares one invite link and one set of grants: a teammate is authorized once for the whole group, and one revoke disconnects them everywhere.
 
 **Tunnel lifecycle**
 
 - **Idle auto-close.** The idle timer starts when a tunnel has no connections, no active grants, no pending requests and no invite links with uses left. By default the tunnel closes after 30 minutes of idle time.
 - An optional **maximum open time** closes the tunnel at a fixed point, whether or not it is in use.
+- While any address in a group is in use, the whole group counts as in use; members are switched on and off together.
 - PortRelay records the first-connection time, the actual connected time and why each tunnel was closed.
 - Editing a tunnel keeps existing connections. Moving a tunnel binds the new port before releasing the old one.
 
@@ -103,6 +105,12 @@ PortRelay turns that into three steps:
     <td align="center"><img src="docs/images/auth-ok.png" alt="Access granted" width="100%"><br><sub>③ Access granted</sub></td>
   </tr>
 </table>
+
+**Tunnel groups.** A group card sums up the state and traffic of the whole group and lists every access address. Each address can be switched, invited or moved out on its own.
+
+<p align="center">
+  <img src="docs/images/app-group.png" alt="Tunnel group" width="100%">
+</p>
 
 **Access management.** Pending requests, authorized devices (with online state and remaining time) and active invite links are all managed in one place.
 
@@ -212,6 +220,8 @@ Open ⚙️ Settings and fill in:
 1. Click **添加通道** (Add tunnel) and enter a name and a target such as `10.0.1.16:3306`. You can probe the target from your machine first, and a free port is suggested automatically.
 2. Keep the default access mode, **仅授权链接** (invite-only). Click **邀请** (Invite), then choose how long access lasts, how many devices may use the link, and whether approval is required.
 3. Send the generated message or QR code. Once the teammate has entered their name, they can connect their database client or SSH to `192.168.1.10:33660`.
+
+To open several hosts at once (a set of servers, say), click **新建通道组** (New tunnel group), enter hosts `10.0.1.11-13` and ports `22`, check the previewed port mapping and create it, then click **邀请整组** (Invite group). Existing tunnels can be ticked to join the group as well.
 
 ## Configuration
 

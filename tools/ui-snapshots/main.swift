@@ -127,6 +127,18 @@ func makeDemoVM(tick: Int = 0) -> PortRelayViewModel {
       "owner":"运维组","duration_minutes":0,"started_at":"\(t(-2100))","effective_idle_close_minutes":30,"idle_close_minutes":30,"first_connected_at":"\(t(-2000))","connected_sec":640,
       "activity":{"in_use":false,"idle_since":"\(t(-720))","auto_close_at":"\(t(1080))","connected_sec":640},
       "metrics":{"tunnel_id":"t3","status":"online","active_conns":0,"total_conns":4,"bytes_in":1983000,"bytes_out":204000,"rate_in":0,"rate_out":0,"blocked_attempts":0}},
+     {"id":"g1a","name":"订单服务 (10.0.3.11)","target":"10.0.3.11:22","listen_port":33670,"whitelist":[],"enabled":true,"group_id":"g1",
+      "owner":"运维组","started_at":"\(t(-1800))","effective_idle_close_minutes":30,"idle_close_minutes":30,"first_connected_at":"\(t(-1500))","connected_sec":\(1320 + Int(dt)),
+      "activity":{"in_use":true,"connected_sec":\(1320 + Int(dt))},
+      "metrics":{"tunnel_id":"g1a","status":"online","active_conns":1,"total_conns":9,"bytes_in":3203180,"bytes_out":18039104,"rate_in":0,"rate_out":0,"blocked_attempts":0}},
+     {"id":"g1b","name":"订单服务 (10.0.3.12)","target":"10.0.3.12:22","listen_port":33671,"whitelist":[],"enabled":true,"group_id":"g1",
+      "owner":"运维组","started_at":"\(t(-1800))","effective_idle_close_minutes":30,"idle_close_minutes":30,"first_connected_at":"\(t(-1400))","connected_sec":\(1100 + Int(dt)),
+      "activity":{"in_use":true,"connected_sec":\(1100 + Int(dt))},
+      "metrics":{"tunnel_id":"g1b","status":"online","active_conns":2,"total_conns":14,"bytes_in":2203180,"bytes_out":12039104,"rate_in":0,"rate_out":0,"blocked_attempts":0}},
+     {"id":"g1c","name":"订单服务 (10.0.3.13)","target":"10.0.3.13:22","listen_port":33672,"whitelist":[],"enabled":true,"group_id":"g1",
+      "owner":"运维组","started_at":"\(t(-1800))","effective_idle_close_minutes":30,"idle_close_minutes":30,"connected_sec":0,
+      "activity":{"in_use":true,"connected_sec":0},
+      "metrics":{"tunnel_id":"g1c","status":"online","active_conns":0,"total_conns":0,"bytes_in":0,"bytes_out":0,"rate_in":0,"rate_out":0,"blocked_attempts":0}},
      {"id":"t4","name":"Redis 缓存","target":"10.0.1.20:6379","listen_port":33663,"whitelist":[],"enabled":false,"last_duration_sec":1905,"duration_minutes":0,"effective_idle_close_minutes":30,"last_connected_sec":742,"close_reason":"闲置 30 分钟自动关闭",
       "historical_bytes_in":3145728,"historical_bytes_out":524288}
     ]
@@ -136,9 +148,24 @@ func makeDemoVM(tick: Int = 0) -> PortRelayViewModel {
     vm.tunnels[2].rate_history = RateSeriesItem(end: Int64(Date().timeIntervalSince1970), step: 5,
         up: (0..<120).map { $0 < 30 ? demoRate($0, seed: 5, base: 300, burst: 2000) : 0 },
         down: (0..<120).map { $0 < 30 ? demoRate($0, seed: 6, base: 1500, burst: 9000) : 0 })
+    for (i, seed) in [(3, 3.3), (4, 4.6)] {
+        vm.tunnels[i].rate_history = demoSeries(tick: tick, seed: seed, base: 4000, burst: 26000, upScale: 0.3)
+    }
+    vm.tunnels[5].rate_history = RateSeriesItem(end: Int64(Date().timeIntervalSince1970), step: 5,
+        up: Array(repeating: 0, count: 120), down: Array(repeating: 0, count: 120))
+    let ga = vm.tunnels[3].rate_history!, gb = vm.tunnels[4].rate_history!
+    vm.groups = decode([GroupItem].self, """
+    [{"id":"g1","name":"订单服务","owner":"运维组","created_at":"\(t(-1800))","tunnel_ids":["g1a","g1b","g1c"],
+      "metrics":{"group_id":"g1",
+        "dynamic_leases":[{"ip":"192.168.1.42","expires_at":"\(t(27000))","name":"小王","invite":"gx1","duration":"8h","started_at":"\(t(-1500))"}],
+        "pending":[{"id":"gr1","tunnel_id":"","group_id":"g1","name":"小李","ip":"192.168.1.57","invite":"gx2","at":"\(t(-40))","status":"pending"}],
+        "invites":[{"code":"gx1","note":"小王","created_at":"\(t(-1700))","expires_at":"\(t(84000))","max_uses":1,"lease_duration":"8h","uses":[{"name":"小王","ip":"192.168.1.42","at":"\(t(-1600))"}]},
+                   {"code":"gx2","note":"测试组","created_at":"\(t(-100))","expires_at":"\(t(86000))","max_uses":3,"lease_duration":"today","require_approval":true}]}}]
+    """)
+    vm.groups[0].rate_history = RateSeriesItem(end: ga.end, step: 5, up: zip(ga.up, gb.up).map { $0 + $1 }, down: zip(ga.down, gb.down).map { $0 + $1 })
     // 卡片与顶部统计的实时速率取曲线最后一个点
     var totalIn: Int64 = 0, totalOut: Int64 = 0
-    for i in 0..<2 {
+    for i in [0, 1, 3, 4] {
         let h = vm.tunnels[i].rate_history!
         vm.tunnels[i].metrics?.rate_in = h.up.last ?? 0
         vm.tunnels[i].metrics?.rate_out = h.down.last ?? 0
@@ -152,6 +179,9 @@ func makeDemoVM(tick: Int = 0) -> PortRelayViewModel {
      {"conn_id":"c2","tunnel_id":"t1","client_ip":"192.168.1.21:50395","connected_at":"\(t(-577))","bytes_in":406528,"bytes_out":3984588,"rate_in":1126,"rate_out":29798},
      {"conn_id":"c3","tunnel_id":"t1","client_ip":"192.168.1.21:53023","connected_at":"\(t(-526))","bytes_in":244213760,"bytes_out":633856,"rate_in":0,"rate_out":0},
      {"conn_id":"c4","tunnel_id":"t2","client_ip":"192.168.1.52:61001","connected_at":"\(t(-3000))","bytes_in":120000,"bytes_out":8800000,"rate_in":120,"rate_out":9100},
+     {"conn_id":"c6","tunnel_id":"g1a","client_ip":"192.168.1.42:50211","connected_at":"\(t(-900))","bytes_in":320000,"bytes_out":1800000,"rate_in":900,"rate_out":5100},
+     {"conn_id":"c7","tunnel_id":"g1b","client_ip":"192.168.1.42:50388","connected_at":"\(t(-600))","bytes_in":220000,"bytes_out":1200000,"rate_in":700,"rate_out":3900},
+     {"conn_id":"c8","tunnel_id":"g1b","client_ip":"192.168.1.42:50390","connected_at":"\(t(-300))","bytes_in":20000,"bytes_out":90000,"rate_in":0,"rate_out":0},
      {"conn_id":"c5","tunnel_id":"t2","client_ip":"192.168.1.60:61201","connected_at":"\(t(-300))","bytes_in":42000,"bytes_out":1800000,"rate_in":80,"rate_out":3100}
     ]
     """)
@@ -162,7 +192,7 @@ func makeDemoVM(tick: Int = 0) -> PortRelayViewModel {
      {"id":"h3","tunnel_id":"t1","tunnel_name":"MySQL 数据库","port":33660,"client_ip":"192.168.1.35:40000","connected_at":"\(t(-90000))","disconnected_at":"\(t(-86000))","duration_sec":4000,"bytes_in":99999999,"bytes_out":1}
     ]
     """)
-    vm.totalActiveConns = 5; vm.totalHistoricalConns = 1633; vm.totalRateIn = totalIn; vm.totalRateOut = totalOut
+    vm.totalActiveConns = 8; vm.totalHistoricalConns = 1656; vm.totalRateIn = totalIn; vm.totalRateOut = totalOut
     vm.totalTransferred = 60000000000; vm.totalBlockedAttempts = 12
     vm.runDiagnostics()
     return vm
@@ -221,12 +251,26 @@ MainActor.assumeIsolated {
 
     // README 截图
     let demo = makeDemoVM()
-    render("readme-main-light", CGSize(width: 980, height: 880), ContentView(vm: demo))
-    render("readme-main-dark", CGSize(width: 980, height: 880), dark: true, ContentView(vm: demo))
+    render("readme-main-light", CGSize(width: 980, height: 1180), ContentView(vm: demo))
+    render("readme-main-dark", CGSize(width: 980, height: 1180), dark: true, ContentView(vm: demo))
     render("readme-invite", CGSize(width: 560, height: 250), InviteSheet(vm: demo, tunnel: demo.tunnels[0], autoGenerate: true, isPresented: yes))
     render("readme-clients", CGSize(width: 760, height: 560), ClientDetailsSheet(vm: demo, tunnel: demo.tunnels[0], initialTab: 0, isPresented: yes))
     render("readme-access", CGSize(width: 760, height: 490), ClientDetailsSheet(vm: demo, tunnel: demo.tunnels[0], initialTab: 2, isPresented: yes))
     render("readme-edit", CGSize(width: 490, height: 760), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[0], isPresented: yes))
+    let g = demo.groups[0]
+    render("group-card", CGSize(width: 980, height: 330), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
+        onEdit: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
+    render("group-card-dark", CGSize(width: 980, height: 330), dark: true, GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
+        onEdit: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
+    render("group-card-narrow", CGSize(width: 720, height: 360), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
+        onEdit: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
+    render("group-sheet-new", CGSize(width: 560, height: 640), GroupEditSheet(vm: demo, group: nil, isPresented: yes,
+        initialName: "订单服务", initialHosts: "10.0.3.11-13", initialPorts: "22, 8080"))
+    render("group-sheet-edit", CGSize(width: 560, height: 520), GroupEditSheet(vm: demo, group: g, isPresented: yes))
+    render("group-invite", CGSize(width: 560, height: 300), InviteSheet(vm: demo, scope: .group(g.id), autoGenerate: true, isPresented: yes))
+    render("group-access", CGSize(width: 760, height: 560), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 2, isPresented: yes))
+    render("group-online", CGSize(width: 760, height: 400), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 0, isPresented: yes))
+    render("group-edit-member", CGSize(width: 490, height: 800), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[3], isPresented: yes))
 
     // README 动图逐帧：卡片随时间推移（每帧 = 5 秒）
     if only.hasPrefix("gif") {

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -252,7 +253,7 @@ func (m *Manager) handleControlMessage(as *agentSession, msgType string, raw []b
 	case protocol.TypeRevokeLease:
 		var msg protocol.RevokeLeaseMessage
 		if json.Unmarshal(raw, &msg) == nil {
-			m.revokeLease(msg.TunnelID, msg.IP)
+			m.revokeLease(scopeOf(msg.TunnelID, msg.GroupID), msg.IP)
 		}
 
 	case protocol.TypeCreateInvite:
@@ -264,13 +265,19 @@ func (m *Manager) handleControlMessage(as *agentSession, msgType string, raw []b
 	case protocol.TypeRevokeInvite:
 		var msg protocol.RevokeInviteMessage
 		if json.Unmarshal(raw, &msg) == nil {
-			m.revokeInvite(msg.TunnelID, msg.Code)
+			m.revokeInvite(scopeOf(msg.TunnelID, msg.GroupID), msg.Code)
 		}
 
 	case protocol.TypeDecideRequest:
 		var msg protocol.DecideRequestMessage
 		if json.Unmarshal(raw, &msg) == nil {
-			m.decideRequest(msg.TunnelID, msg.RequestID, msg.Approve)
+			m.decideRequest(scopeOf(msg.TunnelID, msg.GroupID), msg.RequestID, msg.Approve)
+		}
+
+	case protocol.TypeDeleteGroup:
+		var msg protocol.DeleteGroupMessage
+		if json.Unmarshal(raw, &msg) == nil && msg.GroupID != "" {
+			m.deleteGroup(msg.GroupID)
 		}
 
 	case protocol.TypeKillConn:
@@ -330,12 +337,13 @@ func (m *Manager) registerTunnel(as *agentSession, cfg protocol.TunnelConfig) pr
 	if err != nil {
 		return registerResp(cfg, err)
 	}
-	if old == nil {
-		// 服务端重启或 Agent 重连后，恢复该通道尚未过期的临时放通
-		t.restoreDynamicLeases(m.state.leaseExpiries(cfg.ID))
-	}
 	m.tunnels[cfg.ID] = t
 	m.portMap[cfg.ListenPort] = cfg.ID
+	// 服务端重启或 Agent 重连后，按授权状态恢复该通道（及其所在组）尚未过期的临时放通
+	m.syncAccess(t)
+	if old != nil && old.GroupID() != cfg.GroupID {
+		m.forgetGroupIfEmptyLocked(old.GroupID())
+	}
 
 	log.Printf("[Server] Registered tunnel '%s' listening on 0.0.0.0:%d", cfg.Name, cfg.ListenPort)
 	return registerResp(cfg, nil)
@@ -348,12 +356,14 @@ func (m *Manager) unregisterTunnel(as *agentSession, tunnelID string) {
 		return
 	}
 	// 主动关闭/删除通道时，放通、邀请链接与待审批申请一并失效（断线重连不会走到这里）
-	m.state.forgetTunnel(tunnelID)
+	m.state.forgetScope(tunnelID)
 	if t, exists := m.tunnels[tunnelID]; exists {
 		t.Close()
 		delete(m.portMap, t.ListenPort())
 		delete(m.tunnels, tunnelID)
 		log.Printf("[Server] Unregistered tunnel '%s' (port %d freed)", t.Name(), t.ListenPort())
+		// 组内最后一个开启的通道关闭后，组的邀请与授权一并失效（与单个通道关闭的语义一致）
+		m.forgetGroupIfEmptyLocked(t.GroupID())
 	}
 }
 
@@ -367,8 +377,13 @@ func (m *Manager) updateTunnel(as *agentSession, cfg protocol.TunnelConfig) prot
 	}
 	defer m.mu.Unlock()
 
+	prevGroup := t.GroupID()
 	if t.ListenPort() == cfg.ListenPort {
 		t.UpdateConfig(cfg)
+		m.syncAccess(t)
+		if prevGroup != cfg.GroupID {
+			m.forgetGroupIfEmptyLocked(prevGroup)
+		}
 		log.Printf("[Server] Updated tunnel '%s' whitelist/metadata", cfg.Name)
 		return registerResp(cfg, nil)
 	}
@@ -384,6 +399,10 @@ func (m *Manager) updateTunnel(as *agentSession, cfg protocol.TunnelConfig) prot
 	delete(m.portMap, t.ListenPort())
 	m.tunnels[cfg.ID] = nt
 	m.portMap[cfg.ListenPort] = cfg.ID
+	m.syncAccess(nt)
+	if prevGroup != cfg.GroupID {
+		m.forgetGroupIfEmptyLocked(prevGroup)
+	}
 	log.Printf("[Server] Moved tunnel '%s' from port %d to %d", cfg.Name, t.ListenPort(), cfg.ListenPort)
 	return registerResp(cfg, nil)
 }
@@ -399,21 +418,15 @@ func (m *Manager) killConn(connID string) {
 	}
 }
 
-func (m *Manager) revokeLease(tunnelID, ip string) {
-	m.mu.RLock()
-	t := m.tunnels[tunnelID]
-	m.mu.RUnlock()
-	if t == nil {
-		return
-	}
-	revoked, kicked := t.RevokeDynamic(ip)
-	m.state.removeLease(tunnelID, ip)
+func (m *Manager) revokeLease(scope, ip string) {
+	revoked := m.state.removeLease(scope, ip)
+	kicked := m.syncScope(scope)
 	target := ip
 	if target == "" {
 		target = "all"
 	}
-	log.Printf("[WebAuth] Revoked %d temporary lease(s) (%s) on tunnel %s, disconnected %d client(s)",
-		revoked, target, t.Name(), kicked)
+	log.Printf("[WebAuth] Revoked %d temporary lease(s) (%s) on %s, disconnected %d client(s)",
+		revoked, target, m.scopeName(scope), kicked)
 }
 
 func (m *Manager) tunnel(id string) *Tunnel {
@@ -422,11 +435,117 @@ func (m *Manager) tunnel(id string) *Tunnel {
 	return m.tunnels[id]
 }
 
+// ---- 作用范围：单个通道或通道组 ----
+
+// groupMembersLocked returns the open tunnels of a group ordered by port. Caller must hold m.mu.
+func (m *Manager) groupMembersLocked(groupID string) []*Tunnel {
+	if groupID == "" {
+		return nil
+	}
+	var out []*Tunnel
+	for _, t := range m.tunnels {
+		if t.GroupID() == groupID {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ListenPort() < out[j].ListenPort() })
+	return out
+}
+
+// scopeTunnels returns the open tunnels an access scope applies to
+func (m *Manager) scopeTunnels(scope string) []*Tunnel {
+	id, isGroup := splitScope(scope)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if isGroup {
+		return m.groupMembersLocked(id)
+	}
+	if t := m.tunnels[id]; t != nil {
+		return []*Tunnel{t}
+	}
+	return nil
+}
+
+// scopeName is a display name for logs and pages
+func (m *Manager) scopeName(scope string) string {
+	tunnels := m.scopeTunnels(scope)
+	if len(tunnels) == 0 {
+		return scope
+	}
+	if _, isGroup := splitScope(scope); isGroup {
+		if name := tunnels[0].Snapshot().GroupName; name != "" {
+			return name
+		}
+		return "通道组"
+	}
+	return tunnels[0].Name()
+}
+
+// scopeExpiresOf caps leases by how long the scope stays open: a tunnel's own TTL, or for a
+// group the TTL of its longest-lived member (nil when any member has no TTL)
+func scopeExpiresOf(tunnels []*Tunnel) *time.Time {
+	var latest *time.Time
+	for _, t := range tunnels {
+		exp := t.Snapshot().ExpiresAt
+		if exp == nil {
+			return nil
+		}
+		if latest == nil || exp.After(*latest) {
+			v := *exp
+			latest = &v
+		}
+	}
+	return latest
+}
+
+// syncAccess makes a tunnel's temporary allowlist match the access state — its own leases plus
+// those of its group — and disconnects clients that are no longer permitted.
+func (m *Manager) syncAccess(t *Tunnel) int {
+	leases := m.state.leaseExpiries(t.ID())
+	if gid := t.GroupID(); gid != "" {
+		for ip, exp := range m.state.leaseExpiries(groupScope(gid)) {
+			if cur, ok := leases[ip]; !ok || exp.After(cur) {
+				leases[ip] = exp
+			}
+		}
+	}
+	return t.SetDynamic(leases)
+}
+
+// syncScope re-applies the access state to every open tunnel of a scope
+func (m *Manager) syncScope(scope string) int {
+	kicked := 0
+	for _, t := range m.scopeTunnels(scope) {
+		kicked += m.syncAccess(t)
+	}
+	return kicked
+}
+
+// forgetGroupIfEmptyLocked drops a group's shared access state once none of its tunnels is open.
+// Caller must hold m.mu.
+func (m *Manager) forgetGroupIfEmptyLocked(groupID string) {
+	if groupID == "" || len(m.groupMembersLocked(groupID)) > 0 {
+		return
+	}
+	m.state.forgetScope(groupScope(groupID))
+}
+
+// deleteGroup drops a dissolved group's invites, leases and requests
+func (m *Manager) deleteGroup(groupID string) {
+	scope := groupScope(groupID)
+	m.state.forgetScope(scope)
+	kicked := m.syncScope(scope)
+	log.Printf("[WebAuth] Tunnel group %s dissolved, disconnected %d client(s)", groupID, kicked)
+}
+
 func (m *Manager) createInvite(msg protocol.CreateInviteMessage) protocol.InviteRespMessage {
 	resp := protocol.InviteRespMessage{Type: protocol.TypeInviteResp, RequestID: msg.RequestID}
-	t := m.tunnel(msg.TunnelID)
+	scope := scopeOf(msg.TunnelID, msg.GroupID)
+	open := len(m.scopeTunnels(scope)) > 0
 	switch {
-	case t == nil:
+	case !open && msg.GroupID != "":
+		resp.Error = "通道组内没有开启的通道，无法生成邀请链接"
+	case !open:
 		resp.Error = "通道未开启，无法生成邀请链接"
 	case msg.ValidMinutes <= 0 || msg.ValidMinutes > 30*24*60:
 		resp.Error = "邀请有效期须在 1 分钟到 30 天之间"
@@ -435,49 +554,52 @@ func (m *Manager) createInvite(msg protocol.CreateInviteMessage) protocol.Invite
 	case !protocol.ValidLeaseDuration(msg.LeaseDuration):
 		resp.Error = "无效的授权时长"
 	default:
-		resp.Invite = m.state.createInvite(msg.TunnelID, truncateRunes(msg.Note, 64), time.Duration(msg.ValidMinutes)*time.Minute, msg.MaxUses, msg.LeaseDuration, msg.RequireApproval)
+		resp.Invite = m.state.createInvite(scope, truncateRunes(msg.Note, 64), time.Duration(msg.ValidMinutes)*time.Minute, msg.MaxUses, msg.LeaseDuration, msg.RequireApproval)
 		resp.Success = true
-		log.Printf("[WebAuth] Created invite for tunnel %s (valid %dm, max %d device(s))", t.Name(), msg.ValidMinutes, msg.MaxUses)
+		log.Printf("[WebAuth] Created invite for %s (valid %dm, max %d device(s))", m.scopeName(scope), msg.ValidMinutes, msg.MaxUses)
 	}
 	return resp
 }
 
-func (m *Manager) revokeInvite(tunnelID, code string) {
-	ips := m.state.revokeInvite(tunnelID, code)
-	kicked := 0
-	if t := m.tunnel(tunnelID); t != nil {
-		for _, ip := range ips {
-			_, k := t.RevokeDynamic(ip)
-			kicked += k
-		}
-	}
-	log.Printf("[WebAuth] Revoked invite on tunnel %s: %d lease(s) removed, %d client(s) disconnected", tunnelID, len(ips), kicked)
+func (m *Manager) revokeInvite(scope, code string) {
+	ips := m.state.revokeInvite(scope, code)
+	kicked := m.syncScope(scope)
+	log.Printf("[WebAuth] Revoked invite on %s: %d lease(s) removed, %d client(s) disconnected", m.scopeName(scope), len(ips), kicked)
 }
 
-func (m *Manager) decideRequest(tunnelID, requestID string, approve bool) {
-	t := m.tunnel(tunnelID)
-	if t == nil {
+func (m *Manager) decideRequest(scope, requestID string, approve bool) {
+	tunnels := m.scopeTunnels(scope)
+	if len(tunnels) == 0 {
 		return
 	}
-	r, exp, err := m.state.decide(tunnelID, requestID, approve, t.Snapshot().ExpiresAt)
+	r, _, err := m.state.decide(scope, requestID, approve, scopeExpiresOf(tunnels))
 	if err != nil {
 		return
 	}
 	if approve {
-		t.AddDynamicWhitelist(r.IP, exp)
+		m.syncScope(scope)
 	}
-	log.Printf("[WebAuth] Request from %s (%s) on tunnel %s: %s", r.Name, r.IP, t.Name(), r.Status)
+	log.Printf("[WebAuth] Request from %s (%s) on %s: %s", r.Name, r.IP, m.scopeName(scope), r.Status)
 }
 
-// onClientConnect starts the countdown of a device's lease on its first connection
+// onClientConnect starts the countdown of a device's lease on its first connection.
+// 组授权在首次连上组内任意一个通道时开始计时。
 func (m *Manager) onClientConnect(tunnelID, ip string) {
 	t := m.tunnel(tunnelID)
 	if t == nil {
 		return
 	}
-	if exp, started := m.state.startLease(tunnelID, ip, t.Snapshot().ExpiresAt, time.Now()); started {
-		t.AddDynamicWhitelist(ip, exp)
+	now := time.Now()
+	if exp, started := m.state.startLease(t.ID(), ip, t.Snapshot().ExpiresAt, now); started {
+		m.syncAccess(t)
 		log.Printf("[WebAuth] %s connected for the first time on tunnel %s, access valid until %s", ip, t.Name(), exp.Format("01-02 15:04"))
+	}
+	if gid := t.GroupID(); gid != "" {
+		scope := groupScope(gid)
+		if exp, started := m.state.startLease(scope, ip, scopeExpiresOf(m.scopeTunnels(scope)), now); started {
+			m.syncScope(scope)
+			log.Printf("[WebAuth] %s connected for the first time in group %s, access valid until %s", ip, m.scopeName(scope), exp.Format("01-02 15:04"))
+		}
 	}
 }
 
@@ -516,7 +638,11 @@ func (m *Manager) metricsLoop(as *agentSession) {
 		}
 		tunnelMetricsList := make([]protocol.TunnelMetrics, 0, len(m.tunnels))
 		allActiveConns := make([]protocol.ActiveConnInfo, 0)
+		groupIDs := make(map[string]bool)
 		for _, t := range m.tunnels {
+			if gid := t.GroupID(); gid != "" {
+				groupIDs[gid] = true
+			}
 			// 授权到期（或白名单变更）后，已建立的连接也要断开，“授权后可访问 X”才名副其实
 			for _, addr := range t.EnforceAccess() {
 				log.Printf("[Tunnel %d] access expired, disconnected %s", t.ListenPort(), addr)
@@ -529,6 +655,16 @@ func (m *Manager) metricsLoop(as *agentSession) {
 			tunnelMetricsList = append(tunnelMetricsList, tm)
 			allActiveConns = append(allActiveConns, conns...)
 		}
+		groupMetrics := make([]protocol.GroupMetrics, 0, len(groupIDs))
+		for gid := range groupIDs {
+			scope := groupScope(gid)
+			groupMetrics = append(groupMetrics, protocol.GroupMetrics{
+				GroupID:       gid,
+				DynamicLeases: m.state.leaseList(scope),
+				Invites:       m.state.inviteList(scope),
+				Pending:       m.state.pendingList(scope),
+			})
+		}
 		m.mu.RUnlock()
 
 		m.secEventsMu.Lock()
@@ -539,6 +675,7 @@ func (m *Manager) metricsLoop(as *agentSession) {
 		as.send(protocol.MetricsMessage{
 			Type:           protocol.TypeMetrics,
 			Tunnels:        tunnelMetricsList,
+			Groups:         groupMetrics,
 			ActiveConns:    allActiveConns,
 			SecurityEvents: secCopy,
 		})

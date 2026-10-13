@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,27 +43,27 @@ type leaseInfo struct {
 
 // newLease creates a lease whose countdown starts at the device's first connection.
 // Leases valid for the whole tunnel lifetime start immediately.
-func newLease(name, invite, duration string, tunnelExpires *time.Time, now time.Time) leaseInfo {
+func newLease(name, invite, duration string, scopeExpires *time.Time, now time.Time) leaseInfo {
 	l := leaseInfo{Name: name, Invite: invite, Duration: duration}
 	if duration == protocol.LeaseDurationTunnel {
 		l.StartedAt = &now
-		l.ExpiresAt = leaseExpiry(duration, tunnelExpires, now)
+		l.ExpiresAt = leaseExpiry(duration, scopeExpires, now)
 		return l
 	}
 	l.Deferred = true
 	l.ExpiresAt = now.Add(leaseStartWindow)
-	if tunnelExpires != nil && tunnelExpires.After(now) && tunnelExpires.Before(l.ExpiresAt) {
-		l.ExpiresAt = *tunnelExpires
+	if scopeExpires != nil && scopeExpires.After(now) && scopeExpires.Before(l.ExpiresAt) {
+		l.ExpiresAt = *scopeExpires
 	}
 	return l
 }
 
 // startLease starts the countdown of a deferred lease on the device's first connection.
 // Returns the new expiry and true when the lease was started now.
-func (s *stateStore) startLease(tunnelID, ip string, tunnelExpires *time.Time, now time.Time) (time.Time, bool) {
+func (s *stateStore) startLease(scope, ip string, scopeExpires *time.Time, now time.Time) (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.data[tunnelID]
+	st := s.data[scope]
 	if st == nil {
 		return time.Time{}, false
 	}
@@ -72,16 +73,16 @@ func (s *stateStore) startLease(tunnelID, ip string, tunnelExpires *time.Time, n
 	}
 	l.Deferred = false
 	l.StartedAt = &now
-	l.ExpiresAt = leaseExpiry(l.Duration, tunnelExpires, now)
+	l.ExpiresAt = leaseExpiry(l.Duration, scopeExpires, now)
 	st.Leases[ip] = l
 	s.saveLocked()
 	return l.ExpiresAt, true
 }
 
-func (s *stateStore) lease(tunnelID, ip string) (leaseInfo, bool) {
+func (s *stateStore) lease(scope, ip string) (leaseInfo, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if st := s.data[tunnelID]; st != nil {
+	if st := s.data[scope]; st != nil {
 		l, ok := st.Leases[ip]
 		return l, ok && time.Now().Before(l.ExpiresAt)
 	}
@@ -94,12 +95,33 @@ type tunnelState struct {
 	Requests map[string]*protocol.AccessRequest `json:"requests,omitempty"` // id -> request
 }
 
-// stateStore keeps per-tunnel access state (leases, invites, approval requests).
+// 授权状态的作用范围：单个通道（键为通道 ID，与旧数据兼容）或整个通道组（键为 "group:<组ID>"）
+const groupScopePrefix = "group:"
+
+func groupScope(groupID string) string { return groupScopePrefix + groupID }
+
+// scopeOf returns the state key of a tunnel, or of its group when groupID is set
+func scopeOf(tunnelID, groupID string) string {
+	if groupID != "" {
+		return groupScope(groupID)
+	}
+	return tunnelID
+}
+
+// splitScope returns the tunnel or group ID of a scope and whether it is a group scope
+func splitScope(scope string) (id string, isGroup bool) {
+	if strings.HasPrefix(scope, groupScopePrefix) {
+		return strings.TrimPrefix(scope, groupScopePrefix), true
+	}
+	return scope, false
+}
+
+// stateStore keeps per-scope access state (leases, invites, approval requests).
 // It lives in memory and is optionally persisted to a file so it survives restarts.
 type stateStore struct {
 	path string
 	mu   sync.Mutex
-	data map[string]*tunnelState // tunnelID -> state
+	data map[string]*tunnelState // scope（通道 ID 或 group:<组ID>）-> state
 }
 
 func newStateStore() *stateStore {
@@ -116,7 +138,7 @@ func (m *Manager) EnableLeasePersistence(path string) error {
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(raw, &data); err != nil || !looksLikeState(data) {
-			// 兼容旧格式：tunnelID -> ip -> 到期时间
+			// 兼容旧格式：通道 ID -> ip -> 到期时间
 			var legacy map[string]map[string]time.Time
 			if json.Unmarshal(raw, &legacy) == nil {
 				data = make(map[string]*tunnelState)
@@ -162,7 +184,7 @@ func looksLikeState(d map[string]*tunnelState) bool {
 	return true
 }
 
-func (s *stateStore) tunnelLocked(id string) *tunnelState {
+func (s *stateStore) scopeLocked(id string) *tunnelState {
 	st := s.data[id]
 	if st == nil {
 		st = &tunnelState{}
@@ -195,35 +217,32 @@ func randomCode(n int) string {
 
 // ---- leases ----
 
-func (s *stateStore) grantLease(tunnelID, ip string, exp time.Time, name, invite string) {
+// removeLease removes one lease, or all leases of the scope when ip is empty; returns how many were removed
+func (s *stateStore) removeLease(scope, ip string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tunnelLocked(tunnelID).Leases[ip] = leaseInfo{ExpiresAt: exp, Name: name, Invite: invite}
-	s.saveLocked()
-}
-
-// removeLease removes one lease, or all leases of the tunnel when ip is empty
-func (s *stateStore) removeLease(tunnelID, ip string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.data[tunnelID]
+	st := s.data[scope]
 	if st == nil {
-		return
+		return 0
 	}
+	n := 0
 	if ip == "" {
+		n = len(st.Leases)
 		st.Leases = make(map[string]leaseInfo)
-	} else {
+	} else if _, ok := st.Leases[ip]; ok {
+		n = 1
 		delete(st.Leases, ip)
 	}
 	s.saveLocked()
+	return n
 }
 
-func (s *stateStore) leaseExpiries(tunnelID string) map[string]time.Time {
+func (s *stateStore) leaseExpiries(scope string) map[string]time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
 	out := make(map[string]time.Time)
-	if st := s.data[tunnelID]; st != nil {
+	if st := s.data[scope]; st != nil {
 		for ip, l := range st.Leases {
 			if now.Before(l.ExpiresAt) {
 				out[ip] = l.ExpiresAt
@@ -233,12 +252,12 @@ func (s *stateStore) leaseExpiries(tunnelID string) map[string]time.Time {
 	return out
 }
 
-func (s *stateStore) leaseList(tunnelID string) []protocol.DynamicLease {
+func (s *stateStore) leaseList(scope string) []protocol.DynamicLease {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
 	var out []protocol.DynamicLease
-	if st := s.data[tunnelID]; st != nil {
+	if st := s.data[scope]; st != nil {
 		for ip, l := range st.Leases {
 			if now.Before(l.ExpiresAt) {
 				out = append(out, protocol.DynamicLease{
@@ -252,19 +271,19 @@ func (s *stateStore) leaseList(tunnelID string) []protocol.DynamicLease {
 	return out
 }
 
-// forgetTunnel drops all access state of a tunnel (explicitly closed or deleted)
-func (s *stateStore) forgetTunnel(tunnelID string) {
+// forgetScope drops all access state of a tunnel or group (explicitly closed, deleted or dissolved)
+func (s *stateStore) forgetScope(scope string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.data[tunnelID]; ok {
-		delete(s.data, tunnelID)
+	if _, ok := s.data[scope]; ok {
+		delete(s.data, scope)
 		s.saveLocked()
 	}
 }
 
 // ---- invites ----
 
-func (s *stateStore) createInvite(tunnelID, note string, valid time.Duration, maxUses int, leaseDuration string, requireApproval bool) protocol.Invite {
+func (s *stateStore) createInvite(scope, note string, valid time.Duration, maxUses int, leaseDuration string, requireApproval bool) protocol.Invite {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -280,12 +299,12 @@ func (s *stateStore) createInvite(tunnelID, note string, valid time.Duration, ma
 		LeaseDuration:   leaseDuration,
 		RequireApproval: requireApproval,
 	}
-	s.tunnelLocked(tunnelID).Invites[inv.Code] = inv
+	s.scopeLocked(scope).Invites[inv.Code] = inv
 	s.saveLocked()
 	return *inv
 }
 
-// findInvite returns the tunnel owning an unexpired invite
+// findInvite returns the scope (tunnel or group) owning an unexpired invite
 func (s *stateStore) findInvite(code string) (string, protocol.Invite, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -317,10 +336,10 @@ func capacityOKLocked(st *tunnelState, inv *protocol.Invite, ip string) bool {
 }
 
 // checkInvite validates that ip may use the invite right now
-func (s *stateStore) checkInvite(tunnelID, code, ip string) error {
+func (s *stateStore) checkInvite(scope, code, ip string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.data[tunnelID]
+	st := s.data[scope]
 	if st == nil {
 		return errInviteNotFound
 	}
@@ -349,10 +368,10 @@ func (s *stateStore) recordUseLocked(st *tunnelState, code, name, ip string) {
 }
 
 // useInviteAndGrant records the use and stores the lease atomically; returns the lease
-func (s *stateStore) useInviteAndGrant(tunnelID, code, name, ip string, tunnelExpires *time.Time) (leaseInfo, error) {
+func (s *stateStore) useInviteAndGrant(scope, code, name, ip string, scopeExpires *time.Time) (leaseInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.data[tunnelID]
+	st := s.data[scope]
 	if st == nil {
 		return leaseInfo{}, errInviteNotFound
 	}
@@ -363,19 +382,19 @@ func (s *stateStore) useInviteAndGrant(tunnelID, code, name, ip string, tunnelEx
 	if !capacityOKLocked(st, inv, ip) {
 		return leaseInfo{}, errInviteUsedUp
 	}
-	st = s.tunnelLocked(tunnelID)
+	st = s.scopeLocked(scope)
 	s.recordUseLocked(st, code, name, ip)
-	l := newLease(name, code, inv.LeaseDuration, tunnelExpires, time.Now())
+	l := newLease(name, code, inv.LeaseDuration, scopeExpires, time.Now())
 	st.Leases[ip] = l
 	s.saveLocked()
 	return l, nil
 }
 
 // revokeInvite removes the invite and the leases it granted; returns the affected IPs
-func (s *stateStore) revokeInvite(tunnelID, code string) []string {
+func (s *stateStore) revokeInvite(scope, code string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.data[tunnelID]
+	st := s.data[scope]
 	if st == nil {
 		return nil
 	}
@@ -396,12 +415,12 @@ func (s *stateStore) revokeInvite(tunnelID, code string) []string {
 	return ips
 }
 
-func (s *stateStore) inviteList(tunnelID string) []protocol.Invite {
+func (s *stateStore) inviteList(scope string) []protocol.Invite {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
 	var out []protocol.Invite
-	if st := s.data[tunnelID]; st != nil {
+	if st := s.data[scope]; st != nil {
 		for _, inv := range st.Invites {
 			if now.Before(inv.ExpiresAt) {
 				c := *inv
@@ -417,10 +436,10 @@ func (s *stateStore) inviteList(tunnelID string) []protocol.Invite {
 // ---- approval requests ----
 
 // addRequest files a pending request (re-using an existing pending one from the same IP)
-func (s *stateStore) addRequest(tunnelID, code, name, ip string) (protocol.AccessRequest, error) {
+func (s *stateStore) addRequest(scope, code, name, ip string) (protocol.AccessRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.data[tunnelID]
+	st := s.data[scope]
 	if st == nil {
 		return protocol.AccessRequest{}, errInviteNotFound
 	}
@@ -428,7 +447,7 @@ func (s *stateStore) addRequest(tunnelID, code, name, ip string) (protocol.Acces
 	if !ok || !time.Now().Before(inv.ExpiresAt) {
 		return protocol.AccessRequest{}, errInviteNotFound
 	}
-	st = s.tunnelLocked(tunnelID)
+	st = s.scopeLocked(scope)
 	for _, r := range st.Requests {
 		if r.IP == ip && r.Status == "pending" {
 			r.Name = name
@@ -440,13 +459,17 @@ func (s *stateStore) addRequest(tunnelID, code, name, ip string) (protocol.Acces
 		return protocol.AccessRequest{}, errInviteUsedUp
 	}
 	r := &protocol.AccessRequest{
-		ID:       randomCode(16),
-		TunnelID: tunnelID,
-		Name:     name,
-		IP:       ip,
-		Invite:   code,
-		At:       time.Now(),
-		Status:   "pending",
+		ID:     randomCode(16),
+		Name:   name,
+		IP:     ip,
+		Invite: code,
+		At:     time.Now(),
+		Status: "pending",
+	}
+	if id, isGroup := splitScope(scope); isGroup {
+		r.GroupID = id
+	} else {
+		r.TunnelID = id
 	}
 	st.Requests[r.ID] = r
 	s.saveLocked()
@@ -467,11 +490,11 @@ func (s *stateStore) request(id string) (protocol.AccessRequest, bool) {
 
 // decide marks a pending request; on approval it records the invite use and stores the lease,
 // lasting as long as the originating invite specifies (capped by the tunnel's own TTL).
-func (s *stateStore) decide(tunnelID, id string, approve bool, tunnelExpires *time.Time) (protocol.AccessRequest, time.Time, error) {
+func (s *stateStore) decide(scope, id string, approve bool, scopeExpires *time.Time) (protocol.AccessRequest, time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneRequestsLocked()
-	st := s.data[tunnelID]
+	st := s.data[scope]
 	if st == nil {
 		return protocol.AccessRequest{}, time.Time{}, errRequestGone
 	}
@@ -479,12 +502,12 @@ func (s *stateStore) decide(tunnelID, id string, approve bool, tunnelExpires *ti
 	if !ok || r.Status != "pending" {
 		return protocol.AccessRequest{}, time.Time{}, errRequestGone
 	}
-	st = s.tunnelLocked(tunnelID)
+	st = s.scopeLocked(scope)
 	duration := ""
 	if inv, ok := st.Invites[r.Invite]; ok {
 		duration = inv.LeaseDuration
 	}
-	l := newLease(r.Name, r.Invite, duration, tunnelExpires, time.Now())
+	l := newLease(r.Name, r.Invite, duration, scopeExpires, time.Now())
 	exp := l.ExpiresAt
 	r.At = time.Now()
 	if approve {
@@ -498,12 +521,12 @@ func (s *stateStore) decide(tunnelID, id string, approve bool, tunnelExpires *ti
 	return *r, exp, nil
 }
 
-func (s *stateStore) pendingList(tunnelID string) []protocol.AccessRequest {
+func (s *stateStore) pendingList(scope string) []protocol.AccessRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneRequestsLocked()
 	var out []protocol.AccessRequest
-	if st := s.data[tunnelID]; st != nil {
+	if st := s.data[scope]; st != nil {
 		for _, r := range st.Requests {
 			if r.Status == "pending" {
 				out = append(out, *r)
@@ -581,7 +604,7 @@ func (s *stateStore) saveLocked() {
 
 // leaseExpiry computes when a lease granted now ends, per the invite's lease duration,
 // never outliving the tunnel's own TTL.
-func leaseExpiry(duration string, tunnelExpires *time.Time, now time.Time) time.Time {
+func leaseExpiry(duration string, scopeExpires *time.Time, now time.Time) time.Time {
 	var exp time.Time
 	switch duration {
 	case protocol.LeaseDuration1h:
@@ -597,8 +620,8 @@ func leaseExpiry(duration string, tunnelExpires *time.Time, now time.Time) time.
 	default:
 		exp = now.Add(2 * time.Hour)
 	}
-	if tunnelExpires != nil && tunnelExpires.After(now) && tunnelExpires.Before(exp) {
-		exp = *tunnelExpires
+	if scopeExpires != nil && scopeExpires.After(now) && scopeExpires.Before(exp) {
+		exp = *scopeExpires
 	}
 	return exp
 }

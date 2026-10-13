@@ -17,6 +17,7 @@ const (
 	TypeInviteResp     = "invite_resp"
 	TypeRevokeInvite   = "revoke_invite"
 	TypeDecideRequest  = "decide_request"
+	TypeDeleteGroup    = "delete_group"
 	TypeMetrics        = "metrics_update"
 	TypePing           = "ping"
 	TypePong           = "pong"
@@ -68,6 +69,10 @@ type TunnelConfig struct {
 	Notes              string     `json:"notes,omitempty"`
 	LeaseDuration      string     `json:"lease_duration,omitempty"`   // 已废弃：放通时长改为在每个邀请上设置，保留字段仅为兼容旧配置
 	RequireApproval    bool       `json:"require_approval,omitempty"` // 已废弃：是否审批改为在每个邀请上设置，保留字段仅为兼容旧配置
+	// GroupID 所属通道组：组内通道共用邀请、授权与审批，闲置计时联动
+	GroupID string `json:"group_id,omitempty"`
+	// GroupName 由 Agent 同步到服务端时填写，用于授权页展示（不持久化）
+	GroupName string `json:"group_name,omitempty"`
 }
 
 // RegisterTunnelMessage registers a tunnel on server
@@ -110,11 +115,19 @@ type KillConnMessage struct {
 	ConnID string `json:"conn_id"`
 }
 
-// RevokeLeaseMessage removes a temporary (web-auth) whitelist lease; empty IP revokes all leases of the tunnel
+// RevokeLeaseMessage removes a temporary (web-auth) whitelist lease; empty IP revokes all leases of the scope.
+// 设置 GroupID 时作用于整个通道组的授权（TunnelID 忽略），下同。
 type RevokeLeaseMessage struct {
 	Type     string `json:"type"`
 	TunnelID string `json:"tunnel_id"`
+	GroupID  string `json:"group_id,omitempty"`
 	IP       string `json:"ip,omitempty"`
+}
+
+// DeleteGroupMessage drops the invites, leases and requests of a dissolved tunnel group
+type DeleteGroupMessage struct {
+	Type    string `json:"type"`
+	GroupID string `json:"group_id"`
 }
 
 // Lease durations (Invite.LeaseDuration)：通过邀请获得授权后可访问多久
@@ -185,10 +198,11 @@ type Invite struct {
 	Uses            []InviteUse `json:"uses,omitempty"`
 }
 
-// AccessRequest is an access application on a tunnel that requires approval
+// AccessRequest is an access application on a tunnel (or tunnel group) that requires approval
 type AccessRequest struct {
 	ID       string    `json:"id"`
 	TunnelID string    `json:"tunnel_id"`
+	GroupID  string    `json:"group_id,omitempty"`
 	Name     string    `json:"name"`
 	IP       string    `json:"ip"`
 	Invite   string    `json:"invite,omitempty"`
@@ -201,6 +215,7 @@ type CreateInviteMessage struct {
 	Type         string `json:"type"`
 	RequestID    string `json:"request_id"`
 	TunnelID     string `json:"tunnel_id"`
+	GroupID      string `json:"group_id,omitempty"`
 	Note         string `json:"note,omitempty"`
 	ValidMinutes int    `json:"valid_minutes"`
 	MaxUses      int    `json:"max_uses"`
@@ -223,6 +238,7 @@ type InviteRespMessage struct {
 type RevokeInviteMessage struct {
 	Type     string `json:"type"`
 	TunnelID string `json:"tunnel_id"`
+	GroupID  string `json:"group_id,omitempty"`
 	Code     string `json:"code"`
 }
 
@@ -230,6 +246,7 @@ type RevokeInviteMessage struct {
 type DecideRequestMessage struct {
 	Type      string `json:"type"`
 	TunnelID  string `json:"tunnel_id"`
+	GroupID   string `json:"group_id,omitempty"`
 	RequestID string `json:"request_id"`
 	Approve   bool   `json:"approve"`
 }
@@ -279,6 +296,14 @@ type TunnelMetrics struct {
 	Pending          []AccessRequest `json:"pending,omitempty"`
 }
 
+// GroupMetrics carries the access state shared by all tunnels of a group
+type GroupMetrics struct {
+	GroupID       string          `json:"group_id"`
+	DynamicLeases []DynamicLease  `json:"dynamic_leases,omitempty"`
+	Invites       []Invite        `json:"invites,omitempty"`
+	Pending       []AccessRequest `json:"pending,omitempty"`
+}
+
 // SecurityEvent records blocked or flagged connection attempts
 type SecurityEvent struct {
 	ID        string    `json:"id"`
@@ -293,6 +318,7 @@ type SecurityEvent struct {
 type MetricsMessage struct {
 	Type           string           `json:"type"`
 	Tunnels        []TunnelMetrics  `json:"tunnels"`
+	Groups         []GroupMetrics   `json:"groups,omitempty"`
 	ActiveConns    []ActiveConnInfo `json:"active_conns"`
 	SecurityEvents []SecurityEvent  `json:"security_events,omitempty"`
 }

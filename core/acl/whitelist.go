@@ -96,6 +96,18 @@ func (w *Whitelist) RestoreDynamic(leases map[string]time.Time) {
 	}
 }
 
+// ReplaceDynamic sets the dynamic leases to exactly the given set (the access state store is the source of truth)
+func (w *Whitelist) ReplaceDynamic(leases map[string]time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.dynamic = make(map[string]time.Time, len(leases))
+	for ip, exp := range leases {
+		if parsed := net.ParseIP(strings.TrimSpace(ip)); parsed != nil {
+			w.dynamic[parsed.String()] = exp
+		}
+	}
+}
+
 // RemoveDynamic revokes the lease for ip (all leases when ip is empty) and returns how many were removed
 func (w *Whitelist) RemoveDynamic(ip string) int {
 	w.mu.Lock()

@@ -326,6 +326,14 @@ func TestStaleSessionTeardownKeepsNewSessionTunnels(t *testing.T) {
 	}
 }
 
+// grantTestLease stores a running lease in the access state and applies it to the scope's tunnels
+func grantTestLease(m *Manager, scope, ip string, exp time.Time) {
+	m.state.mu.Lock()
+	m.state.scopeLocked(scope).Leases[ip] = leaseInfo{ExpiresAt: exp}
+	m.state.mu.Unlock()
+	m.syncScope(scope)
+}
+
 func TestUpdateKeepsConnectionsAndLeases(t *testing.T) {
 	m := newTestManager()
 	addr := startServer(t, m)
@@ -339,7 +347,7 @@ func TestUpdateKeepsConnectionsAndLeases(t *testing.T) {
 	m.mu.RLock()
 	tun := m.tunnels["a"]
 	m.mu.RUnlock()
-	tun.AddDynamicWhitelist("10.1.2.3", time.Now().Add(time.Hour))
+	grantTestLease(m, "a", "10.1.2.3", time.Now().Add(time.Hour))
 
 	cfg.Name = "renamed"
 	cfg.Whitelist = []string{"127.0.0.1"}
@@ -623,10 +631,7 @@ func TestExpiredLeaseDisconnectsActiveConnection(t *testing.T) {
 	cfg.Whitelist = nil
 	a.register(t, protocol.TypeRegisterTunnel, cfg)
 
-	m.mu.RLock()
-	tun := m.tunnels["a"]
-	m.mu.RUnlock()
-	tun.AddDynamicWhitelist("127.0.0.1", time.Now().Add(1500*time.Millisecond))
+	grantTestLease(m, "a", "127.0.0.1", time.Now().Add(1500*time.Millisecond))
 
 	c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.ListenPort))
 	if err != nil {

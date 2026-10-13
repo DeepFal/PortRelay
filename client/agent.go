@@ -166,10 +166,14 @@ type TunnelActivity struct {
 
 // inUse: 有在线连接、有效授权（含尚未首次连接的）、待审批申请或仍可使用的邀请
 func tunnelInUse(m protocol.TunnelMetrics) bool {
-	if m.ActiveConns > 0 || len(m.DynamicLeases) > 0 || len(m.Pending) > 0 {
+	return m.ActiveConns > 0 || accessInUse(m.DynamicLeases, m.Pending, m.Invites)
+}
+
+func accessInUse(leases []protocol.DynamicLease, pending []protocol.AccessRequest, invites []protocol.Invite) bool {
+	if len(leases) > 0 || len(pending) > 0 {
 		return true
 	}
-	for _, inv := range m.Invites {
+	for _, inv := range invites {
 		if inv.MaxUses <= 0 || len(inv.Uses) < inv.MaxUses {
 			return true
 		}
@@ -187,6 +191,18 @@ func (a *Agent) trackUsage(now time.Time) {
 	byID := make(map[string]protocol.TunnelMetrics, len(metrics.Tunnels))
 	for _, m := range metrics.Tunnels {
 		byID[m.TunnelID] = m
+	}
+	// 通道组整体在用：组内任一通道在用，或组的邀请 / 授权 / 申请仍有效。组内通道一起计闲置、一起关闭。
+	groupBusy := make(map[string]bool)
+	for _, gm := range metrics.Groups {
+		if accessInUse(gm.DynamicLeases, gm.Pending, gm.Invites) {
+			groupBusy[gm.GroupID] = true
+		}
+	}
+	for _, t := range cfg.Tunnels {
+		if m, ok := byID[t.ID]; ok && t.Enabled && t.GroupID != "" && m.Status == "online" && tunnelInUse(m) {
+			groupBusy[t.GroupID] = true
+		}
 	}
 
 	type closing struct {
@@ -226,7 +242,7 @@ func (a *Agent) trackUsage(now time.Time) {
 				firstConn = append(firstConn, t.ID)
 			}
 		}
-		u.inUse = tunnelInUse(m)
+		u.inUse = tunnelInUse(m) || (t.GroupID != "" && groupBusy[t.GroupID])
 		if u.inUse {
 			u.lastActive = now
 		}
@@ -290,6 +306,20 @@ func (a *Agent) RateSeries(id string) RateSeries {
 		id = totalSeries
 	}
 	return a.rates.series(id, time.Now())
+}
+
+// GroupRateSeries sums the rate curves of several tunnels (a tunnel group)
+func (a *Agent) GroupRateSeries(ids []string) RateSeries {
+	now := time.Now()
+	sum := (&rateHistory{}).series(now)
+	for _, id := range ids {
+		s := a.rates.series(id, now)
+		for k := range sum.Up {
+			sum.Up[k] += s.Up[k]
+			sum.Down[k] += s.Down[k]
+		}
+	}
+	return sum
 }
 
 // Activity returns the live usage of an enabled tunnel (nil when not tracked yet)
@@ -448,7 +478,7 @@ func (a *Agent) connectAndRun(cfg Config) error {
 	for _, t := range a.cm.Get().Tunnels {
 		if t.Enabled {
 			log.Printf("[Agent] 注册通道: %s (:%d -> %s) [责任人: %s]", t.Name, t.ListenPort, t.Target, t.Owner)
-			_ = a.sendControl(protocol.RegisterTunnelMessage{Type: protocol.TypeRegisterTunnel, Tunnel: t})
+			_ = a.sendControl(protocol.RegisterTunnelMessage{Type: protocol.TypeRegisterTunnel, Tunnel: a.wire(t)})
 		}
 	}
 
@@ -696,10 +726,21 @@ func (a *Agent) SyncTunnel(t protocol.TunnelConfig, edited bool) {
 		return
 	}
 	if edited {
-		_ = a.sendControl(protocol.UpdateTunnelMessage{Type: protocol.TypeUpdateTunnel, Tunnel: t})
+		_ = a.sendControl(protocol.UpdateTunnelMessage{Type: protocol.TypeUpdateTunnel, Tunnel: a.wire(t)})
 	} else {
-		_ = a.sendControl(protocol.RegisterTunnelMessage{Type: protocol.TypeRegisterTunnel, Tunnel: t})
+		_ = a.sendControl(protocol.RegisterTunnelMessage{Type: protocol.TypeRegisterTunnel, Tunnel: a.wire(t)})
 	}
+}
+
+// wire fills in what the relay server needs besides the stored config (the group's display name)
+func (a *Agent) wire(t protocol.TunnelConfig) protocol.TunnelConfig {
+	t.GroupName = ""
+	if t.GroupID != "" {
+		if g, ok := a.cm.FindGroup(t.GroupID); ok {
+			t.GroupName = g.Name
+		}
+	}
+	return t
 }
 
 func (a *Agent) RemoveTunnel(id string) {
@@ -712,8 +753,14 @@ func (a *Agent) RemoveTunnel(id string) {
 	_ = a.sendControl(protocol.UnregisterMessage{Type: protocol.TypeUnregister, TunnelID: id})
 }
 
+// Scope selects what an invite, request or lease applies to: one tunnel, or a whole group
+type Scope struct {
+	TunnelID string
+	GroupID  string
+}
+
 // CreateInvite asks the relay server for a new invite link and waits for the result
-func (a *Agent) CreateInvite(tunnelID, note string, validMinutes, maxUses int, leaseDuration string, requireApproval bool) (protocol.Invite, error) {
+func (a *Agent) CreateInvite(scope Scope, note string, validMinutes, maxUses int, leaseDuration string, requireApproval bool) (protocol.Invite, error) {
 	if !a.IsConnected() {
 		return protocol.Invite{}, fmt.Errorf("未连接中继服务器")
 	}
@@ -729,7 +776,7 @@ func (a *Agent) CreateInvite(tunnelID, note string, validMinutes, maxUses int, l
 	}()
 
 	if err := a.sendControl(protocol.CreateInviteMessage{
-		Type: protocol.TypeCreateInvite, RequestID: reqID, TunnelID: tunnelID,
+		Type: protocol.TypeCreateInvite, RequestID: reqID, TunnelID: scope.TunnelID, GroupID: scope.GroupID,
 		Note: note, ValidMinutes: validMinutes, MaxUses: maxUses, LeaseDuration: leaseDuration, RequireApproval: requireApproval,
 	}); err != nil {
 		return protocol.Invite{}, err
@@ -746,27 +793,35 @@ func (a *Agent) CreateInvite(tunnelID, note string, validMinutes, maxUses int, l
 }
 
 // RevokeInvite invalidates an invite link and the leases it granted
-func (a *Agent) RevokeInvite(tunnelID, code string) error {
+func (a *Agent) RevokeInvite(scope Scope, code string) error {
 	if !a.IsConnected() {
 		return fmt.Errorf("未连接中继服务器")
 	}
-	return a.sendControl(protocol.RevokeInviteMessage{Type: protocol.TypeRevokeInvite, TunnelID: tunnelID, Code: code})
+	return a.sendControl(protocol.RevokeInviteMessage{Type: protocol.TypeRevokeInvite, TunnelID: scope.TunnelID, GroupID: scope.GroupID, Code: code})
 }
 
 // DecideRequest approves or rejects a pending access request
-func (a *Agent) DecideRequest(tunnelID, requestID string, approve bool) error {
+func (a *Agent) DecideRequest(scope Scope, requestID string, approve bool) error {
 	if !a.IsConnected() {
 		return fmt.Errorf("未连接中继服务器")
 	}
-	return a.sendControl(protocol.DecideRequestMessage{Type: protocol.TypeDecideRequest, TunnelID: tunnelID, RequestID: requestID, Approve: approve})
+	return a.sendControl(protocol.DecideRequestMessage{Type: protocol.TypeDecideRequest, TunnelID: scope.TunnelID, GroupID: scope.GroupID, RequestID: requestID, Approve: approve})
 }
 
 // RevokeLease removes a temporary whitelist lease on the relay server (all leases when ip is empty)
-func (a *Agent) RevokeLease(tunnelID, ip string) error {
+func (a *Agent) RevokeLease(scope Scope, ip string) error {
 	if !a.IsConnected() {
 		return fmt.Errorf("未连接中继服务器")
 	}
-	return a.sendControl(protocol.RevokeLeaseMessage{Type: protocol.TypeRevokeLease, TunnelID: tunnelID, IP: ip})
+	return a.sendControl(protocol.RevokeLeaseMessage{Type: protocol.TypeRevokeLease, TunnelID: scope.TunnelID, GroupID: scope.GroupID, IP: ip})
+}
+
+// DeleteGroup tells the relay server to drop a dissolved group's invites and leases
+func (a *Agent) DeleteGroup(groupID string) {
+	if !a.IsConnected() {
+		return
+	}
+	_ = a.sendControl(protocol.DeleteGroupMessage{Type: protocol.TypeDeleteGroup, GroupID: groupID})
 }
 
 func (a *Agent) KillConn(connID string) {
@@ -801,6 +856,7 @@ func (a *Agent) GetLatestMetrics() protocol.MetricsMessage {
 	defer a.mu.RUnlock()
 	m := a.latestMetrics
 	m.Tunnels = append([]protocol.TunnelMetrics(nil), m.Tunnels...)
+	m.Groups = append([]protocol.GroupMetrics(nil), m.Groups...)
 	m.ActiveConns = append([]protocol.ActiveConnInfo(nil), m.ActiveConns...)
 	m.SecurityEvents = append([]protocol.SecurityEvent(nil), m.SecurityEvents...)
 	return m

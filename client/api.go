@@ -42,6 +42,8 @@ func (s *APIServer) Handler() http.Handler {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/tunnels", s.handleTunnels)
 	mux.HandleFunc("/api/tunnels/", s.handleTunnelItem)
+	mux.HandleFunc("/api/groups", s.handleGroups)
+	mux.HandleFunc("/api/groups/", s.handleGroupItem)
 	mux.HandleFunc("/api/probe", s.handleProbe)
 	mux.HandleFunc("/api/recommend-port", s.handleRecommendPort)
 	mux.HandleFunc("/api/connections", s.handleConnections)
@@ -212,47 +214,13 @@ func (s *APIServer) handleTunnelItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// POST /api/tunnels/{id}/leases/revoke  {"ip": "..."}；ip 为空表示撤销该通道全部临时放通
-	if len(parts) == 5 && parts[3] == "leases" && parts[4] == "revoke" && r.Method == http.MethodPost {
-		var req struct {
-			IP string `json:"ip"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-			jsonError(w, http.StatusBadRequest, "Invalid JSON")
-			return
-		}
+	// 授权相关：leases/revoke、invites、requests（与通道组共用同一套处理）
+	if len(parts) >= 4 && isAccessPath(parts[3]) {
 		if _, ok := s.cm.FindTunnel(tunnelID); !ok {
 			jsonError(w, http.StatusNotFound, "通道未找到")
 			return
 		}
-		if err := s.agent.RevokeLease(tunnelID, strings.TrimSpace(req.IP)); err != nil {
-			jsonError(w, http.StatusConflict, err.Error())
-			return
-		}
-		jsonResponse(w, http.StatusOK, map[string]string{"status": "revoked"})
-		return
-	}
-
-	// 邀请链接：POST 新建；DELETE /invites/{code} 作废；GET /invites/{code}/share 获取分享文案
-	if len(parts) >= 4 && parts[3] == "invites" {
-		s.handleInvites(w, r, tunnelID, parts[4:])
-		return
-	}
-
-	// POST /api/tunnels/{id}/requests/{rid}  {"approve": true|false}
-	if len(parts) == 5 && parts[3] == "requests" && r.Method == http.MethodPost {
-		var req struct {
-			Approve bool `json:"approve"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, http.StatusBadRequest, "Invalid JSON")
-			return
-		}
-		if err := s.agent.DecideRequest(tunnelID, parts[4], req.Approve); err != nil {
-			jsonError(w, http.StatusConflict, err.Error())
-			return
-		}
-		jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+		s.handleAccess(w, r, Scope{TunnelID: tunnelID}, parts[3:])
 		return
 	}
 
@@ -303,44 +271,59 @@ func (s *APIServer) handleTunnelItem(w http.ResponseWriter, r *http.Request) {
 
 // handleToggle 支持 {"enabled": true|false} 指定目标状态（幂等，防止重复点击来回翻转）；不带 body 时取反
 func (s *APIServer) handleToggle(w http.ResponseWriter, r *http.Request, tunnelID string) {
+	want, err := decodeToggle(r)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	t, err := s.setEnabled(tunnelID, want)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, t)
+}
+
+// decodeToggle reads {"enabled": bool}; nil means "flip"
+func decodeToggle(r *http.Request) (*bool, error) {
 	var req struct {
 		Enabled *bool `json:"enabled"`
 	}
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-			jsonError(w, http.StatusBadRequest, "Invalid JSON")
-			return
+			return nil, err
 		}
 	}
+	return req.Enabled, nil
+}
 
+// setEnabled turns a tunnel on or off (want nil flips it), merging session traffic and syncing the server
+func (s *APIServer) setEnabled(tunnelID string, want *bool) (protocol.TunnelConfig, error) {
 	current, err := s.cm.CurrentEnabled(tunnelID)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, err.Error())
-		return
+		return protocol.TunnelConfig{}, err
 	}
-	want := !current
-	if req.Enabled != nil {
-		want = *req.Enabled
+	target := !current
+	if want != nil {
+		target = *want
 	}
-
 	var sessIn, sessOut int64
-	if !want && current {
+	if !target && current {
 		s.agent.FlushUsage(tunnelID)
 	}
-	if want != current {
+	if target != current {
 		// 关闭时把本次会话流量并入历史；开启时清掉可能残留的旧指标
 		sessIn, sessOut = s.agent.ConsumeSessionBytes(tunnelID)
 	}
-	t, changed, err := s.cm.SetTunnelEnabled(tunnelID, want, sessIn, sessOut)
+	t, changed, err := s.cm.SetTunnelEnabled(tunnelID, target, sessIn, sessOut)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, err.Error())
-		return
+		return t, err
 	}
 	if changed {
 		s.agent.dropUsage(tunnelID)
 		s.agent.SyncTunnel(t, false)
 	}
-	jsonResponse(w, http.StatusOK, t)
+	return t, nil
 }
 
 // inviteBase is the URL prefix of invite links: http://<对外访问地址>:<控制端口>/i/
@@ -358,13 +341,26 @@ func (s *APIServer) inviteBase(cfg Config) string {
 
 // shareText is the ready-to-send message (e.g. for WeChat) for an invite
 func shareText(cfg Config, t protocol.TunnelConfig, inv protocol.Invite, link string) string {
+	return shareMessage(inv, fmt.Sprintf("通道：%s\n访问地址：%s:%d", t.Name, cfg.PublicHostOrDefault(), t.ListenPort), link)
+}
+
+// groupShareText lists every open address of a group with the target behind it
+func groupShareText(cfg Config, g TunnelGroup, members []protocol.TunnelConfig, inv protocol.Invite, link string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "通道组：%s（%d 个地址）\n访问地址：", g.Name, len(members))
+	for _, t := range members {
+		fmt.Fprintf(&b, "\n  %s:%d → %s", cfg.PublicHostOrDefault(), t.ListenPort, t.Target)
+	}
+	return shareMessage(inv, b.String(), link)
+}
+
+func shareMessage(inv protocol.Invite, body, link string) string {
 	var b strings.Builder
 	b.WriteString("【PortRelay 访问邀请】")
 	if inv.Note != "" {
 		b.WriteString("（给 " + inv.Note + "）")
 	}
-	b.WriteString("\n通道：" + t.Name)
-	b.WriteString(fmt.Sprintf("\n访问地址：%s:%d", cfg.PublicHostOrDefault(), t.ListenPort))
+	b.WriteString("\n" + body)
 	action := "填写姓名后即可访问"
 	if inv.RequireApproval {
 		action = "填写姓名提交申请，管理员批准后即可访问"
@@ -379,12 +375,104 @@ func shareText(cfg Config, t protocol.TunnelConfig, inv protocol.Invite, link st
 	return b.String()
 }
 
-func (s *APIServer) handleInvites(w http.ResponseWriter, r *http.Request, tunnelID string, rest []string) {
-	t, ok := s.cm.FindTunnel(tunnelID)
-	if !ok {
-		jsonError(w, http.StatusNotFound, "通道未找到")
-		return
+func isAccessPath(p string) bool {
+	return p == "leases" || p == "invites" || p == "requests"
+}
+
+// handleAccess serves the access endpoints shared by tunnels and groups:
+//
+//	POST   leases/revoke            {"ip": "..."}（ip 为空表示撤销全部）
+//	POST   invites                  新建邀请
+//	DELETE invites/{code}           作废邀请
+//	GET    invites/{code}/share     分享文案
+//	POST   requests/{rid}           {"approve": true|false}
+func (s *APIServer) handleAccess(w http.ResponseWriter, r *http.Request, sc Scope, rest []string) {
+	switch {
+	case len(rest) == 2 && rest[0] == "leases" && rest[1] == "revoke" && r.Method == http.MethodPost:
+		var req struct {
+			IP string `json:"ip"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			jsonError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+		if err := s.agent.RevokeLease(sc, strings.TrimSpace(req.IP)); err != nil {
+			jsonError(w, http.StatusConflict, err.Error())
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "revoked"})
+
+	case rest[0] == "invites":
+		s.handleInvites(w, r, sc, rest[1:])
+
+	case len(rest) == 2 && rest[0] == "requests" && r.Method == http.MethodPost:
+		var req struct {
+			Approve bool `json:"approve"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+		if err := s.agent.DecideRequest(sc, rest[1], req.Approve); err != nil {
+			jsonError(w, http.StatusConflict, err.Error())
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+
+	default:
+		http.NotFound(w, r)
 	}
+}
+
+// scopeShare builds the share message for an invite of a tunnel or group
+func (s *APIServer) scopeShare(cfg Config, sc Scope, inv protocol.Invite, link string) string {
+	if sc.GroupID != "" {
+		g, _ := s.cm.FindGroup(sc.GroupID)
+		var open []protocol.TunnelConfig
+		for _, t := range s.cm.GroupMembers(sc.GroupID) {
+			if t.Enabled {
+				open = append(open, t)
+			}
+		}
+		return groupShareText(cfg, g, open, inv, link)
+	}
+	t, _ := s.cm.FindTunnel(sc.TunnelID)
+	return shareText(cfg, t, inv, link)
+}
+
+// scopeOpen reports whether the tunnel, or at least one tunnel of the group, is enabled
+func (s *APIServer) scopeOpen(sc Scope) bool {
+	if sc.GroupID != "" {
+		for _, t := range s.cm.GroupMembers(sc.GroupID) {
+			if t.Enabled {
+				return true
+			}
+		}
+		return false
+	}
+	t, ok := s.cm.FindTunnel(sc.TunnelID)
+	return ok && t.Enabled
+}
+
+// scopeInvites returns the live invites of a tunnel or group
+func scopeInvites(m protocol.MetricsMessage, sc Scope) []protocol.Invite {
+	if sc.GroupID != "" {
+		for _, g := range m.Groups {
+			if g.GroupID == sc.GroupID {
+				return g.Invites
+			}
+		}
+		return nil
+	}
+	for _, t := range m.Tunnels {
+		if t.TunnelID == sc.TunnelID {
+			return t.Invites
+		}
+	}
+	return nil
+}
+
+func (s *APIServer) handleInvites(w http.ResponseWriter, r *http.Request, sc Scope, rest []string) {
 	cfg := s.cm.Get()
 
 	switch {
@@ -415,11 +503,15 @@ func (s *APIServer) handleInvites(w http.ResponseWriter, r *http.Request, tunnel
 		if req.LeaseDuration == "" {
 			req.LeaseDuration = protocol.LeaseDuration2h
 		}
-		if !t.Enabled {
-			jsonError(w, http.StatusConflict, "通道未开启，请先开启通道再生成邀请链接")
+		if !s.scopeOpen(sc) {
+			msg := "通道未开启，请先开启通道再生成邀请链接"
+			if sc.GroupID != "" {
+				msg = "通道组内没有开启的通道，请先开启再生成邀请链接"
+			}
+			jsonError(w, http.StatusConflict, msg)
 			return
 		}
-		inv, err := s.agent.CreateInvite(tunnelID, strings.TrimSpace(req.Note), req.ValidMinutes, maxUses, req.LeaseDuration, req.RequireApproval)
+		inv, err := s.agent.CreateInvite(sc, strings.TrimSpace(req.Note), req.ValidMinutes, maxUses, req.LeaseDuration, req.RequireApproval)
 		if err != nil {
 			jsonError(w, http.StatusConflict, err.Error())
 			return
@@ -428,27 +520,22 @@ func (s *APIServer) handleInvites(w http.ResponseWriter, r *http.Request, tunnel
 		jsonResponse(w, http.StatusCreated, map[string]any{
 			"invite":     inv,
 			"link":       link,
-			"share_text": shareText(cfg, t, inv, link),
+			"share_text": s.scopeShare(cfg, sc, inv, link),
 		})
 
 	case len(rest) == 1 && r.Method == http.MethodDelete:
-		if err := s.agent.RevokeInvite(tunnelID, rest[0]); err != nil {
+		if err := s.agent.RevokeInvite(sc, rest[0]); err != nil {
 			jsonError(w, http.StatusConflict, err.Error())
 			return
 		}
 		jsonResponse(w, http.StatusOK, map[string]string{"status": "revoked"})
 
 	case len(rest) == 2 && rest[1] == "share" && r.Method == http.MethodGet:
-		for _, m := range s.agent.GetLatestMetrics().Tunnels {
-			if m.TunnelID != tunnelID {
-				continue
-			}
-			for _, inv := range m.Invites {
-				if inv.Code == rest[0] {
-					link := s.inviteBase(cfg) + inv.Code
-					jsonResponse(w, http.StatusOK, map[string]any{"invite": inv, "link": link, "share_text": shareText(cfg, t, inv, link)})
-					return
-				}
+		for _, inv := range scopeInvites(s.agent.GetLatestMetrics(), sc) {
+			if inv.Code == rest[0] {
+				link := s.inviteBase(cfg) + inv.Code
+				jsonResponse(w, http.StatusOK, map[string]any{"invite": inv, "link": link, "share_text": s.scopeShare(cfg, sc, inv, link)})
+				return
 			}
 		}
 		jsonError(w, http.StatusNotFound, "邀请链接不存在或已过期")
@@ -504,10 +591,10 @@ func (s *APIServer) handleRecommendPort(w http.ResponseWriter, r *http.Request) 
 // handleConnections returns live client connections (optionally for one tunnel) and recent security events
 func (s *APIServer) handleConnections(w http.ResponseWriter, r *http.Request) {
 	metrics := s.agent.GetLatestMetrics()
-	tunnelID := r.URL.Query().Get("tunnel_id")
+	match := s.tunnelFilter(r)
 	conns := make([]protocol.ActiveConnInfo, 0, len(metrics.ActiveConns))
 	for _, c := range metrics.ActiveConns {
-		if tunnelID == "" || c.TunnelID == tunnelID {
+		if match(c.TunnelID) {
 			conns = append(conns, c)
 		}
 	}
@@ -537,8 +624,29 @@ func (s *APIServer) handleKillConn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleClientHistory(w http.ResponseWriter, r *http.Request) {
-	tunnelID := r.URL.Query().Get("tunnel_id")
-	jsonResponse(w, http.StatusOK, s.cm.GetClientHistory(tunnelID))
+	match := s.tunnelFilter(r)
+	out := make([]protocol.ClientHistoryRecord, 0)
+	for _, rec := range s.cm.GetClientHistory("") {
+		if match(rec.TunnelID) {
+			out = append(out, rec)
+		}
+	}
+	jsonResponse(w, http.StatusOK, out)
+}
+
+// tunnelFilter matches tunnels selected by ?tunnel_id= or ?group_id= (everything when neither is set)
+func (s *APIServer) tunnelFilter(r *http.Request) func(id string) bool {
+	if gid := r.URL.Query().Get("group_id"); gid != "" {
+		ids := make(map[string]bool)
+		for _, t := range s.cm.GroupMembers(gid) {
+			ids[t.ID] = true
+		}
+		return func(id string) bool { return ids[id] }
+	}
+	if tid := r.URL.Query().Get("tunnel_id"); tid != "" {
+		return func(id string) bool { return id == tid }
+	}
+	return func(string) bool { return true }
 }
 
 func (s *APIServer) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -595,6 +703,7 @@ func (s *APIServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		payload := s.statusPayload()
 		payload["metrics"] = metrics
 		payload["tunnels"] = s.tunnelsWithMetrics(metrics)
+		payload["groups"] = s.groupsView(metrics)
 		data, _ := json.Marshal(payload)
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 			return false

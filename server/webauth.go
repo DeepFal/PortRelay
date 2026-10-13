@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/DeepFal/PortRelay/core/protocol"
@@ -58,31 +59,61 @@ func (m *Manager) accessHost(r *http.Request) string {
 	return r.Host
 }
 
-// inviteTarget resolves an invite code to its (currently registered) tunnel
-func (m *Manager) inviteTarget(code string) (*Tunnel, protocol.Invite, string) {
+// accessScope is what an invite or request grants access to: one tunnel or a whole tunnel group
+type accessScope struct {
+	key     string
+	group   bool
+	name    string
+	tunnels []protocol.TunnelConfig // 当前开启的通道，按端口排序
+	expires *time.Time
+}
+
+// resolveScope looks up the open tunnels of a scope; false when none is open
+func (m *Manager) resolveScope(scope string) (accessScope, bool) {
+	tunnels := m.scopeTunnels(scope)
+	if len(tunnels) == 0 {
+		return accessScope{}, false
+	}
+	_, isGroup := splitScope(scope)
+	sc := accessScope{key: scope, group: isGroup, expires: scopeExpiresOf(tunnels)}
+	for _, t := range tunnels {
+		sc.tunnels = append(sc.tunnels, t.Snapshot())
+	}
+	sc.name = sc.tunnels[0].Name
+	if isGroup {
+		sc.name = sc.tunnels[0].GroupName
+		if sc.name == "" {
+			sc.name = "通道组"
+		}
+	}
+	return sc, true
+}
+
+// inviteTarget resolves an invite code to the tunnel or group it grants access to
+func (m *Manager) inviteTarget(code string) (accessScope, protocol.Invite, string) {
 	code = strings.TrimSpace(code)
 	if code == "" {
-		return nil, protocol.Invite{}, "缺少邀请码"
+		return accessScope{}, protocol.Invite{}, "缺少邀请码"
 	}
-	tunnelID, inv, ok := m.state.findInvite(code)
+	scope, inv, ok := m.state.findInvite(code)
 	if !ok {
-		return nil, protocol.Invite{}, "链接无效或已过期，请向管理员索取新的邀请链接"
+		return accessScope{}, protocol.Invite{}, "链接无效或已过期，请向管理员索取新的邀请链接"
 	}
-	t := m.tunnel(tunnelID)
-	if t == nil {
-		return nil, protocol.Invite{}, "对应通道当前未开启，请联系管理员"
+	sc, ok := m.resolveScope(scope)
+	if !ok {
+		return accessScope{}, protocol.Invite{}, "对应通道当前未开启，请联系管理员"
 	}
-	return t, inv, ""
+	return sc, inv, ""
 }
 
 func (m *Manager) serveInviteForm(w http.ResponseWriter, r *http.Request, code string) {
 	ip := clientIPOf(r)
-	t, inv, problem := m.inviteTarget(code)
+	sc, inv, problem := m.inviteTarget(code)
 	if problem == "" && ip == "" {
 		problem = "无法识别客户端 IP"
 	}
 	if problem == "" {
-		if err := m.state.checkInvite(t.ID(), inv.Code, ip); err != nil {
+		if err := m.state.checkInvite(sc.key, inv.Code, ip); err != nil {
 			problem = err.Error()
 		}
 	}
@@ -91,7 +122,6 @@ func (m *Manager) serveInviteForm(w http.ResponseWriter, r *http.Request, code s
 		return
 	}
 
-	cfg := t.Snapshot()
 	action := "确认并获取访问权限"
 	approvalTip := ""
 	if inv.RequireApproval {
@@ -107,9 +137,9 @@ func (m *Manager) serveInviteForm(w http.ResponseWriter, r *http.Request, code s
 		  <button type="submit">%s</button>
 		</form>
 		%s`,
-		m.detailRows(r, cfg, ip, durationText(inv.LeaseDuration)),
+		m.detailRows(r, sc, ip, durationText(inv.LeaseDuration)),
 		html.EscapeString(inv.Code), maxNameRunes, action, approvalTip)
-	m.writePage(w, r, http.StatusOK, pageForm, "申请访问 "+cfg.Name, body)
+	m.writePage(w, r, http.StatusOK, pageForm, "申请访问 "+sc.name, body)
 }
 
 func sanitizeName(s string) string {
@@ -130,7 +160,7 @@ func (m *Manager) serveInviteSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIPOf(r)
 	name := sanitizeName(r.PostForm.Get("name"))
-	t, inv, problem := m.inviteTarget(r.PostForm.Get("code"))
+	sc, inv, problem := m.inviteTarget(r.PostForm.Get("code"))
 	switch {
 	case problem != "":
 	case ip == "":
@@ -143,27 +173,26 @@ func (m *Manager) serveInviteSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := t.Snapshot()
 	if inv.RequireApproval {
-		req, err := m.state.addRequest(cfg.ID, inv.Code, name, ip)
+		req, err := m.state.addRequest(sc.key, inv.Code, name, ip)
 		if err != nil {
 			m.writePage(w, r, http.StatusConflict, pageError, "无法提交申请", problemHTML(err.Error()))
 			return
 		}
-		log.Printf("[WebAuth] Access request from %s (%s) on tunnel %s awaiting approval", name, ip, cfg.Name)
+		log.Printf("[WebAuth] Access request from %s (%s) on %s awaiting approval", name, ip, sc.name)
 		http.Redirect(w, r, "/auth/status?id="+url.QueryEscape(req.ID), http.StatusSeeOther)
 		return
 	}
 
-	lease, err := m.state.useInviteAndGrant(cfg.ID, inv.Code, name, ip, cfg.ExpiresAt)
+	lease, err := m.state.useInviteAndGrant(sc.key, inv.Code, name, ip, sc.expires)
 	if err != nil {
 		m.writePage(w, r, http.StatusConflict, pageError, "无法完成授权", problemHTML(err.Error()))
 		return
 	}
-	t.AddDynamicWhitelist(ip, lease.ExpiresAt)
-	log.Printf("[WebAuth] Granted %s (%s) access to tunnel %s (port %d): %s",
-		name, ip, cfg.Name, cfg.ListenPort, leaseValidity(lease))
-	m.writePage(w, r, http.StatusOK, pageSuccess, "授权成功", m.successBody(r, cfg, ip, lease))
+	m.syncScope(sc.key)
+	log.Printf("[WebAuth] Granted %s (%s) access to %s (%d port(s)): %s",
+		name, ip, sc.name, len(sc.tunnels), leaseValidity(lease))
+	m.writePage(w, r, http.StatusOK, pageSuccess, "授权成功", m.successBody(r, sc, ip, lease))
 }
 
 func (m *Manager) serveRequestStatus(w http.ResponseWriter, r *http.Request) {
@@ -172,23 +201,21 @@ func (m *Manager) serveRequestStatus(w http.ResponseWriter, r *http.Request) {
 		m.writePage(w, r, http.StatusNotFound, pageError, "申请已失效", problemHTML("申请不存在或已过期，请重新打开邀请链接提交"))
 		return
 	}
-	t := m.tunnel(req.TunnelID)
+	sc, open := m.resolveScope(scopeOf(req.TunnelID, req.GroupID))
 	switch {
 	case req.Status == "rejected":
 		m.writePage(w, r, http.StatusOK, pageError, "申请未通过", problemHTML("管理员拒绝了您的访问申请"))
-	case t == nil:
+	case !open:
 		m.writePage(w, r, http.StatusOK, pageError, "通道未开启", problemHTML("对应通道当前未开启，请联系管理员"))
 	case req.Status == "approved":
-		cfg := t.Snapshot()
-		lease, _ := m.state.lease(cfg.ID, req.IP)
-		m.writePage(w, r, http.StatusOK, pageSuccess, "申请已批准", m.successBody(r, cfg, req.IP, lease))
+		lease, _ := m.state.lease(sc.key, req.IP)
+		m.writePage(w, r, http.StatusOK, pageSuccess, "申请已批准", m.successBody(r, sc, req.IP, lease))
 	default:
-		cfg := t.Snapshot()
 		duration := ""
 		if _, inv, ok := m.state.findInvite(req.Invite); ok {
 			duration = inv.LeaseDuration
 		}
-		body := m.detailRows(r, cfg, req.IP, durationText(duration)) +
+		body := m.detailRows(r, sc, req.IP, durationText(duration)) +
 			fmt.Sprintf(`<div class="tip">%s，您的申请已提交，正在等待管理员批准。此页面会自动刷新。</div>`, html.EscapeString(req.Name))
 		w.Header().Set("Refresh", "5")
 		m.writePage(w, r, http.StatusOK, pagePending, "等待管理员批准", body)
@@ -211,20 +238,37 @@ func leaseValidity(l leaseInfo) string {
 	return "至 " + l.ExpiresAt.Format("01-02 15:04")
 }
 
-func (m *Manager) successBody(r *http.Request, cfg protocol.TunnelConfig, ip string, l leaseInfo) string {
-	return m.detailRows(r, cfg, ip, leaseValidity(l)) +
-		`<div class="tip">您的设备已获得访问权限，现在可以直接用客户端连接上面的访问地址，计时从首次连接开始。到期后如需继续使用，请向管理员索取新的邀请链接。</div>`
+func (m *Manager) successBody(r *http.Request, sc accessScope, ip string, l leaseInfo) string {
+	where := "上面的访问地址"
+	if sc.group {
+		where = "上面任意一个访问地址"
+	}
+	return m.detailRows(r, sc, ip, leaseValidity(l)) +
+		`<div class="tip">您的设备已获得访问权限，现在可以直接用客户端连接` + where + `，计时从首次连接开始。到期后如需继续使用，请向管理员索取新的邀请链接。</div>`
 }
 
-// detailRows renders the tunnel info table
-func (m *Manager) detailRows(r *http.Request, cfg protocol.TunnelConfig, ip string, validity string) string {
-	validity = html.EscapeString(validity)
-	return fmt.Sprintf(`
-		<div class="row"><span class="label">目标通道</span><span class="value">%s</span></div>
-		<div class="row"><span class="label">访问地址</span><span class="value mono">%s:%d</span></div>
+// detailRows renders the info table; a group lists every access address with its target
+func (m *Manager) detailRows(r *http.Request, sc accessScope, ip string, validity string) string {
+	host := html.EscapeString(m.accessHost(r))
+	var target, addresses string
+	if sc.group {
+		target = fmt.Sprintf(`<div class="row"><span class="label">目标通道组</span><span class="value">%s（%d 个地址）</span></div>`,
+			html.EscapeString(sc.name), len(sc.tunnels))
+		var b strings.Builder
+		for _, t := range sc.tunnels {
+			fmt.Fprintf(&b, `<div class="map"><span class="mono">%s:%d</span><span class="to">%s</span></div>`,
+				host, t.ListenPort, html.EscapeString(t.Target))
+		}
+		addresses = `<div class="row stack"><span class="label">访问地址</span><div class="maps">` + b.String() + `</div></div>`
+	} else {
+		t := sc.tunnels[0]
+		target = fmt.Sprintf(`<div class="row"><span class="label">目标通道</span><span class="value">%s</span></div>`, html.EscapeString(t.Name))
+		addresses = fmt.Sprintf(`<div class="row"><span class="label">访问地址</span><span class="value mono">%s:%d</span></div>`, host, t.ListenPort)
+	}
+	return target + addresses + fmt.Sprintf(`
 		<div class="row"><span class="label">您的设备 IP</span><span class="value mono">%s</span></div>
 		<div class="row"><span class="label">访问有效期</span><span class="value highlight">%s</span></div>`,
-		html.EscapeString(cfg.Name), html.EscapeString(m.accessHost(r)), cfg.ListenPort, html.EscapeString(ip), validity)
+		html.EscapeString(ip), html.EscapeString(validity))
 }
 
 func problemHTML(msg string) string {
@@ -284,6 +328,11 @@ func renderPage(kind pageKind, title, body string) string {
   .label { color:var(--sub); white-space:nowrap; }
   .value { font-weight:600; text-align:right; word-break:break-all; }
   .mono { font-family:ui-monospace,Menlo,Monaco,Consolas,monospace; background:var(--code-bg); padding:2px 6px; border-radius:4px; }
+  .row.stack { align-items:flex-start; }
+  .maps { display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
+  .map { display:flex; align-items:center; gap:8px; font-weight:600; }
+  .map .to { color:var(--sub); font-weight:400; font-size:12px; }
+  .map .to::before { content:"→ "; }
   .highlight { color:var(--accent); }
   .tip { margin-top:20px; padding:12px 14px; background:var(--code-bg); border-radius:8px; font-size:12px; line-height:1.5; color:var(--sub); }
   .tip.error { color:#FF3B30; background:rgba(255,59,48,0.1); font-weight:600; text-align:center; }

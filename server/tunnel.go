@@ -118,13 +118,28 @@ func (t *Tunnel) ID() string {
 	return t.Config.ID
 }
 
-func (t *Tunnel) restoreDynamicLeases(leases map[string]time.Time) {
-	if len(leases) == 0 {
-		return
+// SetDynamic replaces the temporary leases with the given set and disconnects
+// active clients that are no longer permitted. Returns how many were disconnected.
+func (t *Tunnel) SetDynamic(leases map[string]time.Time) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.whitelist.ReplaceDynamic(leases)
+	kicked := 0
+	for id, ac := range t.activeConns {
+		if ok, _ := t.whitelist.IsAllowed(ac.ClientIP); !ok {
+			_ = ac.Conn.Close()
+			delete(t.activeConns, id)
+			kicked++
+		}
 	}
+	return kicked
+}
+
+// GroupID returns the tunnel group this tunnel belongs to ("" when none)
+func (t *Tunnel) GroupID() string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	t.whitelist.RestoreDynamic(leases)
+	return t.Config.GroupID
 }
 
 // Name returns the tunnel display name
