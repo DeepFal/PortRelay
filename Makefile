@@ -3,6 +3,7 @@
 #   make server      交叉编译 Linux 服务端到 dist/
 #   make agent       编译当前平台的 Agent 到 bin/
 #   make app         构建 macOS 应用 PortRelay.app（需要 Xcode 命令行工具）
+#   make install-app 构建并替换 /Applications/PortRelay.app（正在运行的会先退出，装好后重新打开）
 #   make release     打包所有平台的服务端 / Agent 到 dist/
 #   make snapshots   离屏渲染 App 界面截图（tools/ui-snapshots/out）
 
@@ -12,7 +13,7 @@ GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/arm64 darwin/amd64 windows/amd64
 
-.PHONY: all test fmt server agent app release snapshots clean
+.PHONY: all test fmt server agent app install-app release snapshots clean
 
 all: test agent
 
@@ -33,6 +34,18 @@ agent:
 
 app:
 	VERSION=$(VERSION) ./build-app.sh
+
+# 正常退出正在运行的 App（会一并停止后台引擎）后替换，装好后按原状态重新打开
+install-app: app
+	@running=; \
+	if pgrep -f /Applications/PortRelay.app/ >/dev/null; then \
+		running=1; osascript -e 'quit app "PortRelay"' >/dev/null; \
+		for i in $$(seq 1 30); do pgrep -f /Applications/PortRelay.app/ >/dev/null || break; sleep 0.5; done; \
+		if pgrep -f /Applications/PortRelay.app/ >/dev/null; then echo "PortRelay 未能退出，已放弃替换"; exit 1; fi; \
+	fi; \
+	rm -rf /Applications/PortRelay.app && ditto PortRelay.app /Applications/PortRelay.app && rm -rf PortRelay.app; \
+	echo "✓ 已安装 /Applications/PortRelay.app ($(VERSION))"; \
+	if [ -n "$$running" ]; then open /Applications/PortRelay.app; fi
 
 release:
 	@rm -rf dist && mkdir -p dist
