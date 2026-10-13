@@ -189,7 +189,10 @@ func makeDemoVM(tick: Int = 0) -> PortRelayViewModel {
     [
      {"id":"h1","tunnel_id":"t1","tunnel_name":"MySQL 数据库","port":33660,"client_ip":"192.168.1.21:51000","connected_at":"\(t(-5000))","disconnected_at":"\(t(-4000))","duration_sec":1000,"bytes_in":1288490188,"bytes_out":5368709},
      {"id":"h2","tunnel_id":"t1","tunnel_name":"MySQL 数据库","port":33660,"client_ip":"192.168.1.21:51001","connected_at":"\(t(-3000))","disconnected_at":"\(t(-2990))","duration_sec":10,"bytes_in":2048,"bytes_out":4096},
-     {"id":"h3","tunnel_id":"t1","tunnel_name":"MySQL 数据库","port":33660,"client_ip":"192.168.1.35:40000","connected_at":"\(t(-90000))","disconnected_at":"\(t(-86000))","duration_sec":4000,"bytes_in":99999999,"bytes_out":1}
+     {"id":"h3","tunnel_id":"t1","tunnel_name":"MySQL 数据库","port":33660,"client_ip":"192.168.1.35:40000","connected_at":"\(t(-90000))","disconnected_at":"\(t(-86000))","duration_sec":4000,"bytes_in":99999999,"bytes_out":1},
+     {"id":"h4","tunnel_id":"g1a","tunnel_name":"订单服务 (10.0.3.11)","port":33670,"client_ip":"192.168.1.42:50100","connected_at":"\(t(-7000))","disconnected_at":"\(t(-6400))","duration_sec":600,"bytes_in":820000,"bytes_out":5200000},
+     {"id":"h5","tunnel_id":"g1b","tunnel_name":"订单服务 (10.0.3.12)","port":33671,"client_ip":"192.168.1.42:50120","connected_at":"\(t(-6800))","disconnected_at":"\(t(-6000))","duration_sec":800,"bytes_in":420000,"bytes_out":3100000},
+     {"id":"h6","tunnel_id":"g1a","tunnel_name":"订单服务 (10.0.3.11)","port":33670,"client_ip":"192.168.1.66:41022","connected_at":"\(t(-90000))","disconnected_at":"\(t(-88200))","duration_sec":1800,"bytes_in":1200000,"bytes_out":9400000}
     ]
     """)
     vm.totalActiveConns = 8; vm.totalHistoricalConns = 1656; vm.totalRateIn = totalIn; vm.totalRateOut = totalOut
@@ -241,8 +244,8 @@ MainActor.assumeIsolated {
     render("01b-main-min", CGSize(width: 920, height: 640), ContentView(vm: vm))
     render("04-clients-history", CGSize(width: 760, height: 600), ClientDetailsSheet(vm: vm, tunnel: t1, initialTab: 1, isPresented: yes))
     render("05-clients-auth", CGSize(width: 760, height: 600), ClientDetailsSheet(vm: vm, tunnel: t1, initialTab: 2, isPresented: yes))
-    render("06-edit-new", CGSize(width: 490, height: 760), TunnelEditSheet(vm: vm, tunnel: nil, isPresented: yes))
-    render("07-edit-existing", CGSize(width: 490, height: 760), TunnelEditSheet(vm: vm, tunnel: vm.tunnels[1], isPresented: yes))
+    render("06-edit-new", CGSize(width: 520, height: 760), TunnelEditSheet(vm: vm, tunnel: nil, isPresented: yes))
+    render("07-edit-existing", CGSize(width: 520, height: 760), TunnelEditSheet(vm: vm, tunnel: vm.tunnels[1], isPresented: yes))
     render("08-invite-form", CGSize(width: 560, height: 400), InviteSheet(vm: vm, tunnel: t1, autoGenerate: false, isPresented: yes))
     render("09-invite-result", CGSize(width: 560, height: 400), InviteSheet(vm: vm, tunnel: t1, autoGenerate: true, isPresented: yes))
     render("10-settings", CGSize(width: 400, height: 320), SettingsSheet(vm: vm, isPresented: yes))
@@ -256,7 +259,7 @@ MainActor.assumeIsolated {
     render("readme-invite", CGSize(width: 560, height: 250), InviteSheet(vm: demo, tunnel: demo.tunnels[0], autoGenerate: true, isPresented: yes))
     render("readme-clients", CGSize(width: 760, height: 560), ClientDetailsSheet(vm: demo, tunnel: demo.tunnels[0], initialTab: 0, isPresented: yes))
     render("readme-access", CGSize(width: 760, height: 490), ClientDetailsSheet(vm: demo, tunnel: demo.tunnels[0], initialTab: 2, isPresented: yes))
-    render("readme-edit", CGSize(width: 490, height: 760), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[0], isPresented: yes))
+    render("readme-edit", CGSize(width: 520, height: 760), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[0], isPresented: yes))
     let g = demo.groups[0]
     render("group-card", CGSize(width: 980, height: 330), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
         onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
@@ -264,14 +267,19 @@ MainActor.assumeIsolated {
         onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
     render("group-card-narrow", CGSize(width: 720, height: 360), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
         onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
-    render("group-add-batch", CGSize(width: 490, height: 860), TunnelEditSheet(vm: demo, tunnel: nil, isPresented: yes,
-        draftName: "订单服务", draftTarget: "10.0.3.11-13:22, 10.0.3.11-13:8080"))
-    render("group-add-member", CGSize(width: 490, height: 780), TunnelEditSheet(vm: demo, tunnel: nil, isPresented: yes, groupId: g.id))
+    render("group-add-batch", CGSize(width: 520, height: 900), TunnelEditSheet(vm: demo, tunnel: nil, isPresented: yes,
+        draftName: "订单服务", draftRows: [("10.0.3.11", "22, 8080"), ("10.0.3.12", "22, 8080"), ("10.0.3.13", "22")]))
+    render("group-add-single", CGSize(width: 520, height: 780), TunnelEditSheet(vm: demo, tunnel: nil, isPresented: yes,
+        draftName: "MySQL 实习库", draftRows: [("10.0.1.16", "3306")]))
+    render("group-add-member", CGSize(width: 520, height: 780), TunnelEditSheet(vm: demo, tunnel: nil, isPresented: yes, groupId: g.id))
     render("group-sheet-edit", CGSize(width: 520, height: 420), GroupEditSheet(vm: demo, group: g, isPresented: yes))
     render("group-invite", CGSize(width: 560, height: 300), InviteSheet(vm: demo, scope: .group(g.id), autoGenerate: true, isPresented: yes))
     render("group-access", CGSize(width: 760, height: 560), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 2, isPresented: yes))
     render("group-online", CGSize(width: 760, height: 400), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 0, isPresented: yes))
-    render("group-edit-member", CGSize(width: 490, height: 800), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[3], isPresented: yes))
+    render("group-online-addr", CGSize(width: 760, height: 460), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 0, byAddress: true, isPresented: yes))
+    render("group-history", CGSize(width: 760, height: 400), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 1, isPresented: yes))
+    render("group-history-addr", CGSize(width: 760, height: 520), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 1, byAddress: true, isPresented: yes))
+    render("group-edit-member", CGSize(width: 520, height: 800), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[3], isPresented: yes))
 
     // README 动图逐帧：卡片随时间推移（每帧 = 5 秒）
     if only.hasPrefix("gif") {

@@ -268,6 +268,13 @@ struct ServerStatusResp: Codable {
     var total_rate_history: RateSeriesItem?
 }
 
+/// 连通性测试结果
+struct ProbeOutcome {
+    let ok: Bool
+    /// 延迟，或失败原因
+    let detail: String
+}
+
 struct ProbeResp: Codable {
     var target: String
     var reachable: Bool
@@ -1044,7 +1051,7 @@ class PortRelayViewModel: ObservableObject {
     /// 菜单内容有变化时才需要重建（避免每秒重建打断已展开的菜单）
     func menuNeedsRebuild() -> Bool {
         // 分步拼接：一长串字符串相加会让旧版编译器类型推断超时
-        let tunnelSig: String = tunnels.map { "\($0.id):\($0.name):\($0.listen_port):\($0.enabled)" }.joined(separator: ",")
+        let tunnelSig: String = tunnels.map { "\($0.id):\($0.name):\($0.listen_port):\($0.enabled):\($0.group_id ?? "")" }.joined(separator: ",")
         let groupSig: String = groups.map { "\($0.id):\($0.name)" }.joined(separator: ",")
         let pendingSig: String = pendingRequests.map { $0.request.id }.joined(separator: ",")
         let sig = [String(isConnected), tunnelSig, groupSig, pendingSig].joined(separator: "|")
@@ -1225,49 +1232,36 @@ class PortRelayViewModel: ObservableObject {
         return (true, try? JSONDecoder().decode(BatchResp.self, from: data), nil)
     }
 
-    /// 同时测试多个目标的连通性，全部连通才算成功
-    func probeTargets(_ targets: [String]) async -> (Bool, String) {
-        if targets.count == 1 { return await probeTarget(target: targets[0]) }
-        var failed: [String: String] = [:]
-        await withTaskGroup(of: (String, Bool, String).self) { group in
-            for t in targets {
-                group.addTask {
-                    let (ok, msg) = await self.probeTarget(target: t)
-                    return (t, ok, msg)
-                }
-            }
-            for await (t, ok, msg) in group where !ok {
-                failed[t] = msg
-            }
-        }
-        guard let first = targets.first(where: { failed[$0] != nil }) else {
-            return (true, "全部 \(targets.count) 个目标连接成功")
-        }
-        let more = failed.count > 1 ? "（共 \(failed.count) 个失败）" : ""
-        return (false, "\(targets.count - failed.count)/\(targets.count) 连接成功；\(first) \(failed[first] ?? "")\(more)")
-    }
-
-    func probeTarget(target: String) async -> (Bool, String) {
-        guard let url = URL(string: "http://127.0.0.1:33080/api/probe") else { return (false, "无效地址") }
+    /// 测试一个目标的连通性；detail 为延迟或失败原因
+    func probe(_ target: String) async -> ProbeOutcome {
+        guard let url = URL(string: "http://127.0.0.1:33080/api/probe") else { return ProbeOutcome(ok: false, detail: "无效地址") }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body = ["target": target]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["target": target])
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
-            if let res = try? JSONDecoder().decode(ProbeResp.self, from: data) {
-                if res.reachable {
-                    return (true, "连接成功 (\(res.rtt))")
-                } else {
-                    return (false, "连接失败: \(res.error ?? "超时")")
-                }
+            guard let res = try? JSONDecoder().decode(ProbeResp.self, from: data) else {
+                return ProbeOutcome(ok: false, detail: "解析失败")
             }
-            return (false, "解析失败")
+            return res.reachable ? ProbeOutcome(ok: true, detail: res.rtt) : ProbeOutcome(ok: false, detail: res.error ?? "超时")
         } catch {
-            return (false, error.localizedDescription)
+            return ProbeOutcome(ok: false, detail: error.localizedDescription)
         }
+    }
+
+    /// 同时测试多个目标
+    func probeAll(_ targets: [String]) async -> [String: ProbeOutcome] {
+        var out: [String: ProbeOutcome] = [:]
+        await withTaskGroup(of: (String, ProbeOutcome).self) { group in
+            for t in targets {
+                group.addTask { (t, await self.probe(t)) }
+            }
+            for await (t, r) in group {
+                out[t] = r
+            }
+        }
+        return out
     }
 
     func recommendPort() async -> Int {
@@ -2808,12 +2802,17 @@ struct ClientDetailsSheet: View {
     @State private var expandedIPs: Set<String> = []
     @State private var expandedHistoryIPs: Set<String> = []
     @State private var isRevoking: Bool = false
+    /// 通道组：在线连接与接入记录按设备（来源 IP）或按组内地址查看
+    @State private var byAddress: Bool = false
+    @State private var collapsedOnlineAddrs: Set<String> = []
+    @State private var expandedHistoryAddrs: Set<String> = []
 
-    init(vm: PortRelayViewModel, scope: AccessScope, initialTab: Int = 0, isPresented: Binding<Bool>) {
+    init(vm: PortRelayViewModel, scope: AccessScope, initialTab: Int = 0, byAddress: Bool = false, isPresented: Binding<Bool>) {
         _vm = ObservedObject(wrappedValue: vm)
         self.scope = scope
         _isPresented = isPresented
         _selectedTab = State(initialValue: initialTab)
+        _byAddress = State(initialValue: byAddress)
     }
 
     init(vm: PortRelayViewModel, tunnel: TunnelItem, initialTab: Int = 0, isPresented: Binding<Bool>) {
@@ -2837,12 +2836,45 @@ struct ClientDetailsSheet: View {
         return "\(vm.publicHost):\(t.listen_port) → \(t.target)"
     }
 
-    /// 通道组：这台设备连到了组内哪些地址
-    func groupTargetsSummary(_ conns: [ActiveClientInfo]) -> String {
+    /// 通道组：设备访问了组内哪些地址（" · 访问 10.0.1.11、10.0.1.12"）；组内端口都相同时只写主机
+    func addressesSummary(_ tunnelIDs: Set<String>) -> String {
         guard scope.isGroup else { return "" }
-        let targets = Set(conns.compactMap { targetLabel($0.tunnel_id) })
-        if targets.count == 1, let only = targets.first { return " · \(only)" }
-        return " · 连到 \(targets.count) 个地址"
+        let used = members.filter { tunnelIDs.contains($0.id) }
+        guard !used.isEmpty else { return "" }
+        let samePort = Set(members.map { portOf($0.target) }).count == 1
+        let labels: [String] = used.map { samePort ? hostOf($0.target) : $0.target }
+        if labels.count > 3 { return " · 访问 \(labels.count) 个地址" }
+        return " · 访问 " + labels.joined(separator: "、")
+    }
+
+    /// 有在线连接 / 接入记录的组内地址数
+    var addressesOnline: Int { Set(activeClientsForTunnel.map { $0.tunnel_id }).intersection(memberIDs).count }
+    var addressesWithHistory: Int { Set(historyRecords.map { $0.tunnel_id }).intersection(memberIDs).count }
+
+    var dimensionSummary: String {
+        if selectedTab == 0 {
+            return byAddress ? "\(addressesOnline)/\(members.count) 个地址正在使用"
+                : "\(clientGroups.count) 台设备 · \(activeClientsForTunnel.count) 个连接"
+        }
+        return byAddress ? "\(addressesWithHistory)/\(members.count) 个地址有接入记录"
+            : "\(historyGroups.count) 台设备 · \(historyRecords.count) 次连接"
+    }
+
+    /// 通道组的在线 / 接入记录可以按设备或按地址看
+    var dimensionBar: some View {
+        HStack(spacing: 8) {
+            Text(verbatim: dimensionSummary)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Spacer()
+            Picker("", selection: $byAddress) {
+                Text("按设备").tag(false)
+                Text("按地址").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
     }
 
     /// 通道组里每个连接经过的目标（"→ 10.0.1.11:22"）
@@ -2902,6 +2934,10 @@ struct ClientDetailsSheet: View {
             .pickerStyle(.segmented)
             .padding(.vertical, 4)
 
+            if scope.isGroup && selectedTab != 2 {
+                dimensionBar
+            }
+
             Divider()
 
             // Tab Content
@@ -2920,8 +2956,14 @@ struct ClientDetailsSheet: View {
                 } else {
                     ScrollView {
                         VStack(spacing: 8) {
-                            ForEach(clientGroups) { g in
-                                clientGroupRow(g)
+                            if scope.isGroup && byAddress {
+                                ForEach(members) { t in
+                                    onlineAddressRow(t)
+                                }
+                            } else {
+                                ForEach(clientGroups) { g in
+                                    clientGroupRow(g)
+                                }
                             }
                         }
                         .padding(.bottom, 8)
@@ -2944,8 +2986,14 @@ struct ClientDetailsSheet: View {
                 } else {
                     ScrollView {
                         VStack(spacing: 8) {
-                            ForEach(historyGroups) { g in
-                                historyGroupRow(g)
+                            if scope.isGroup && byAddress {
+                                ForEach(members) { t in
+                                    historyAddressRow(t)
+                                }
+                            } else {
+                                ForEach(historyGroups) { g in
+                                    historyGroupRow(g)
+                                }
                             }
                         }
                         .padding(.bottom, 8)
@@ -2996,8 +3044,12 @@ struct ClientDetailsSheet: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         TagView("\(g.records.count) 次连接")
+                        if let n = leaseName(g.ip) {
+                            TagView("已授权 · \(n)", color: .green)
+                        }
                     }
-                    Text(verbatim: "最近 \(formatDateTimeShort(g.lastSeen)) · 首次 \(formatDateTimeShort(g.firstSeen)) · 累计 \(formatSecondsToDuration(g.totalDuration))")
+                    Text(verbatim: "最近 \(formatDateTimeShort(g.lastSeen)) · 首次 \(formatDateTimeShort(g.firstSeen)) · 累计 \(formatSecondsToDuration(g.totalDuration))"
+                         + addressesSummary(Set(g.records.map { $0.tunnel_id })))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -3059,6 +3111,182 @@ struct ClientDetailsSheet: View {
         .rowCard()
     }
 
+    // MARK: 按地址（通道组）
+
+    func addressLabel(_ t: TunnelItem) -> some View {
+        HStack(spacing: 6) {
+            Text(verbatim: "\(vm.publicHost):\(t.listen_port)")
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundColor(.accentColor)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            Text(verbatim: t.target)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
+        .lineLimit(1)
+    }
+
+    /// 设备 IP + 授权时填写的姓名
+    func deviceLabel(_ ip: String) -> some View {
+        HStack(spacing: 6) {
+            Text(verbatim: ip)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let n = leaseName(ip) {
+                TagView(n, color: .green)
+            }
+        }
+    }
+
+    /// 组内一个地址：此刻哪些设备连着它
+    @ViewBuilder
+    func onlineAddressRow(_ t: TunnelItem) -> some View {
+        let conns: [ActiveClientInfo] = activeClientsForTunnel.filter { $0.tunnel_id == t.id }
+        let devices: [ClientIPGroup] = Dictionary(grouping: conns) { hostOf($0.client_ip) }
+            .map { ClientIPGroup(ip: $0.key, conns: $0.value) }
+            .sorted { $0.ip < $1.ip }
+        let all = ClientIPGroup(ip: t.id, conns: conns)
+        let expanded = !conns.isEmpty && !collapsedOnlineAddrs.contains(t.id)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                chevron(expanded, visible: !conns.isEmpty)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        addressLabel(t)
+                        TagView(conns.isEmpty ? "无连接" : "\(devices.count) 台设备 · \(conns.count) 个连接")
+                    }
+                    Text(verbatim: conns.isEmpty ? (t.enabled ? "暂无设备连接" : "已关闭")
+                         : "最早接入 \(formatDateTimeShort(all.firstConnectedAt)) · ↑ \(formatBytes(all.bytesIn))  ↓ \(formatBytes(all.bytesOut))")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                .layoutPriority(1)
+                Spacer(minLength: 8)
+                if !conns.isEmpty {
+                    RateText(up: all.rateIn, down: all.rateOut)
+                    Button("全部断开", role: .destructive) {
+                        Task { await vm.killClients(connIds: conns.map { $0.conn_id }) }
+                    }
+                    .controlSize(.small)
+                    .frame(width: 76, alignment: .trailing)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .onTapGesture { if !conns.isEmpty { toggle(t.id, in: &collapsedOnlineAddrs) } }
+
+            if expanded {
+                Divider().padding(.leading, 32).padding(.trailing, 12)
+                VStack(spacing: 0) {
+                    ForEach(devices) { d in
+                        HStack(spacing: 8) {
+                            Color.clear.frame(width: 12)
+                            deviceLabel(d.ip)
+                                .frame(width: 200, alignment: .leading)
+                            Text(verbatim: "\(d.conns.count) 个连接 · 接入 \(formatTimeHHmm(d.firstConnectedAt))")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Spacer(minLength: 8)
+                            RateText(up: d.rateIn, down: d.rateOut, size: 10)
+                            Button("断开") {
+                                Task { await vm.killClients(connIds: d.conns.map { $0.conn_id }) }
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundColor(.red)
+                            .font(.system(size: 11))
+                            .frame(width: 76, alignment: .trailing)
+                        }
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .rowCard()
+        .opacity(conns.isEmpty ? 0.6 : 1)
+    }
+
+    /// 组内一个地址：谁、什么时候访问过它
+    @ViewBuilder
+    func historyAddressRow(_ t: TunnelItem) -> some View {
+        let records: [ClientHistoryRecord] = historyRecords.filter { $0.tunnel_id == t.id }.sorted { $0.connected_at > $1.connected_at }
+        let summary = HistoryIPGroup(ip: t.id, records: records)
+        let devices = Set(records.map { hostOf($0.client_ip) }).count
+        let expanded = !records.isEmpty && isExpanded(t.id, in: expandedHistoryAddrs, groupCount: addressesWithHistory)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                chevron(expanded, visible: !records.isEmpty)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        addressLabel(t)
+                        TagView(records.isEmpty ? "暂无记录" : "\(devices) 台设备 · \(records.count) 次连接")
+                    }
+                    if !records.isEmpty {
+                        Text(verbatim: "最近 \(formatDateTimeShort(summary.lastSeen)) · 首次 \(formatDateTimeShort(summary.firstSeen)) · 累计 \(formatSecondsToDuration(summary.totalDuration))")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .layoutPriority(1)
+                Spacer(minLength: 8)
+                if !records.isEmpty {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(verbatim: formatBytes(summary.bytesIn + summary.bytesOut))
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        Text(verbatim: "↑ \(formatBytes(summary.bytesIn))  ↓ \(formatBytes(summary.bytesOut))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    .lineLimit(1)
+                    .frame(width: 190, alignment: .trailing)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .onTapGesture { if !records.isEmpty { toggle(t.id, in: &expandedHistoryAddrs) } }
+
+            if expanded {
+                Divider().padding(.leading, 32).padding(.trailing, 12)
+                VStack(spacing: 0) {
+                    ForEach(records) { rec in
+                        HStack(spacing: 8) {
+                            Color.clear.frame(width: 12)
+                            deviceLabel(hostOf(rec.client_ip))
+                                .frame(width: 200, alignment: .leading)
+                            Text(verbatim: "\(formatDateTimeShort(rec.connected_at)) – \(formatTimeHHmm(rec.disconnected_at))")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .frame(width: 180, alignment: .leading)
+                            Text(verbatim: formatSecondsToDuration(rec.duration_sec))
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Spacer(minLength: 8)
+                            Text(verbatim: "↑ \(formatBytes(rec.bytes_in))  ↓ \(formatBytes(rec.bytes_out))")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .frame(width: 190, alignment: .trailing)
+                        }
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .rowCard()
+        .opacity(records.isEmpty ? 0.6 : 1)
+    }
+
     func isLeased(_ ip: String) -> Bool {
         leases.contains { $0.ip == ip }
     }
@@ -3088,7 +3316,7 @@ struct ClientDetailsSheet: View {
                         }
                     }
                     Text(verbatim: "最早接入 \(formatDateTimeShort(g.firstConnectedAt)) · ↑ \(formatBytes(g.bytesIn))  ↓ \(formatBytes(g.bytesOut))"
-                         + groupTargetsSummary(g.conns))
+                         + addressesSummary(Set(g.conns.map { $0.tunnel_id })))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -3480,6 +3708,68 @@ struct DiagnosticsSheet: View {
 
 // MARK: - Edit / Create Sheet (With Owner & Duration TTL)
 
+/// 添加通道表单里的一行目标：一台主机 + 一个或多个端口（"22, 3306"、"8080-8082"）。
+/// 主机格也接受逗号分隔的几台、末段范围（10.0.1.11-13）或自带端口的 主机:端口。
+struct TargetRow: Identifiable, Equatable {
+    let id = UUID()
+    var host: String = ""
+    var ports: String = ""
+
+    static let separators: Set<Character> = [" ", ",", "，", "、", ";", "；", "\n", "\r", "\t"]
+
+    static func items(_ s: String) -> [String] {
+        s.split(whereSeparator: { separators.contains($0) }).map(String.init)
+    }
+
+    /// "10.0.1.11:22" / "[fd00::1]:22" → (主机, 端口)；不带端口（含裸 IPv6）返回 nil
+    static func splitHostPort(_ item: String) -> (String, String)? {
+        if item.hasPrefix("["), let close = item.firstIndex(of: "]") {
+            let rest = item[item.index(after: close)...]
+            guard rest.hasPrefix(":"), rest.count > 1 else { return nil }
+            return (String(item[item.index(after: item.startIndex)..<close]), String(rest.dropFirst()))
+        }
+        let parts = item.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
+        return (String(parts[0]), String(parts[1]))
+    }
+
+    /// 粘贴进来的一串目标拆成多行：每项是 "主机" 或 "主机:端口"，同一主机的端口并到一行
+    static func parse(_ text: String, defaultPorts: String) -> [TargetRow] {
+        var out: [TargetRow] = []
+        for item in items(text) {
+            let (host, port) = splitHostPort(item) ?? (item, "")
+            if let i = out.firstIndex(where: { $0.host == host }) {
+                if !port.isEmpty && !items(out[i].ports).contains(port) {
+                    out[i].ports = out[i].ports.isEmpty ? port : out[i].ports + ", " + port
+                }
+            } else {
+                out.append(TargetRow(host: host, ports: port.isEmpty ? defaultPorts : port))
+            }
+        }
+        return out
+    }
+
+    /// 拼成 "主机:端口, …" 交给服务端展开；还没填完整的行先跳过
+    static func compose(_ rows: [TargetRow]) -> String {
+        var out: [String] = []
+        for r in rows {
+            let ports = items(r.ports)
+            for h in items(r.host) {
+                if splitHostPort(h) != nil {
+                    out.append(h)
+                    continue
+                }
+                guard !ports.isEmpty else { continue }
+                let host = h.contains(":") && !h.hasPrefix("[") ? "[\(h)]" : h
+                for p in ports {
+                    out.append("\(host):\(p)")
+                }
+            }
+        }
+        return out.joined(separator: ", ")
+    }
+}
+
 struct TunnelEditSheet: View {
     @ObservedObject var vm: PortRelayViewModel
     let tunnel: TunnelItem?
@@ -3487,7 +3777,7 @@ struct TunnelEditSheet: View {
 
     @State private var name: String
     @State private var owner: String
-    @State private var target: String
+    @State private var rows: [TargetRow]
     @State private var portString: String
     @State private var durationMinutes: Int
     @State private var idleCloseMinutes: Int
@@ -3496,14 +3786,15 @@ struct TunnelEditSheet: View {
     @State private var accessMode: AccessMode
     @State private var groupChoice: GroupChoice
     @State private var newGroupName: String = ""
-    /// 填了多个目标时将创建的通道（服务端预览）
+    /// 将创建的通道（服务端预览，含自动分配的访问端口）
     @State private var plan: [PlannedTunnel] = []
     @State private var planError: String? = nil
-    @State private var probeMessage: String = ""
-    @State private var probeOK: Bool = false
+    /// 连通性测试结果，按目标
+    @State private var probes: [String: ProbeOutcome] = [:]
     @State private var isProbing: Bool = false
     @State private var isSaving: Bool = false
     @State private var errorMessage: String? = nil
+    @FocusState private var focusedRow: UUID?
 
     /// 新建完成后打开邀请：独立通道，或新建的通道组。加入已有组时不需要——组的授权自动覆盖新地址
     var onCreated: ((AccessScope) -> Void)? = nil
@@ -3512,7 +3803,7 @@ struct TunnelEditSheet: View {
         case linkOnly, specific, all
     }
 
-    /// 通道组选项：不分组、新建、或加入已有组
+    /// 通道组选项。新建时多个地址自动新建组（以名称为组名）；编辑时可以新建组并移入
     enum GroupChoice: Hashable {
         case none
         case new
@@ -3524,7 +3815,7 @@ struct TunnelEditSheet: View {
     /// 表单字段在创建时就用通道数据填好，不依赖 onAppear（避免第一帧显示空表单）。
     /// groupId：新建时默认加入的通道组（通道组卡片上的「添加地址」）
     init(vm: PortRelayViewModel, tunnel: TunnelItem?, isPresented: Binding<Bool>, groupId: String? = nil,
-         draftName: String = "", draftTarget: String = "", onCreated: ((AccessScope) -> Void)? = nil) {
+         draftName: String = "", draftRows: [(String, String)] = [], onCreated: ((AccessScope) -> Void)? = nil) {
         _vm = ObservedObject(wrappedValue: vm)
         self.tunnel = tunnel
         self.onCreated = onCreated
@@ -3534,7 +3825,12 @@ struct TunnelEditSheet: View {
         _accessMode = State(initialValue: mode)
         _name = State(initialValue: tunnel?.name ?? draftName)
         _owner = State(initialValue: tunnel.map { $0.owner ?? "" } ?? NSUserName())
-        _target = State(initialValue: tunnel?.target ?? draftTarget)
+        var initialRows = draftRows.map { TargetRow(host: $0.0, ports: $0.1) }
+        if let t = tunnel {
+            let (h, p) = TargetRow.splitHostPort(t.target) ?? (t.target, "")
+            initialRows = [TargetRow(host: h, ports: p)]
+        }
+        _rows = State(initialValue: initialRows.isEmpty ? [TargetRow()] : initialRows)
         _portString = State(initialValue: tunnel.map { "\($0.listen_port)" } ?? "")
         // 最长开启时长：新建默认不限制（主要依靠闲置自动关闭）；duration_minutes 为 0 时 JSON 中会省略
         _durationMinutes = State(initialValue: tunnel.map { $0.duration_minutes ?? 0 } ?? 0)
@@ -3547,47 +3843,42 @@ struct TunnelEditSheet: View {
 
     // MARK: Derived state
 
-    /// 可能填了多个目标（逗号 / 空格分隔，或含范围 "10.0.1.11-13:22"），需要服务端展开
-    var mayBeMulti: Bool {
-        guard !isEdit else { return false }
-        let items = target.split(whereSeparator: { " ,，、;；\n\t".contains($0) })
-        return items.count > 1 || target.contains("-")
-    }
+    var composedTarget: String { TargetRow.compose(rows) }
 
-    /// 确实会创建多个通道
-    var isBatch: Bool { mayBeMulti && plan.count > 1 }
+    /// 会创建多个通道（自动放进通道组）
+    var isBatch: Bool { !isEdit && plan.count > 1 }
 
-    /// 新建通道组的名称：没填时与通道名称相同
+    var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
+
+    /// 新建通道组的名称：新建时就是名称；编辑时可另填，没填时与通道名称相同
     var resolvedGroupName: String {
         let n = newGroupName.trimmingCharacters(in: .whitespaces)
-        return n.isEmpty ? name.trimmingCharacters(in: .whitespaces) : n
+        return isEdit && !n.isEmpty ? n : trimmedName
     }
 
-    /// 选中的通道组名称（不分组为 nil）
-    var chosenGroupName: String? {
-        switch groupChoice {
-        case .none: return nil
-        case .new: return newGroupName.trimmingCharacters(in: .whitespaces)
-        case .existing(let id): return vm.group(id)?.name
-        }
+    var existingGroupName: String? {
+        if case .existing(let id) = groupChoice { return vm.group(id)?.name }
+        return nil
+    }
+
+    var nameTitle: String {
+        isBatch && groupChoice == .new ? "通道组名称" : "通道名称"
     }
 
     var namePlaceholder: String {
-        if !isEdit, let g = chosenGroupName, !g.isEmpty {
+        if !isEdit, let g = existingGroupName {
             return "可不填，默认「\(g) (主机)」"
         }
         return isBatch ? "例如：订单服务" : "例如：MySQL 实习库"
     }
 
     var canSave: Bool {
-        if isSaving || target.trimmingCharacters(in: .whitespaces).isEmpty { return false }
-        if mayBeMulti && planError != nil { return false }
-        let hasName = !name.trimmingCharacters(in: .whitespaces).isEmpty
-        switch groupChoice {
-        case .none: return hasName
-        case .new: return !resolvedGroupName.isEmpty && (hasName || !isEdit)
-        case .existing: return hasName || !isEdit
+        if isSaving { return false }
+        if isEdit {
+            return !trimmedName.isEmpty && !composedTarget.isEmpty && (groupChoice != .new || !resolvedGroupName.isEmpty)
         }
+        if plan.isEmpty || planError != nil { return false }
+        return !trimmedName.isEmpty || existingGroupName != nil
     }
 
     func makeForm(port: Int, whitelist: [String]) -> TunnelForm {
@@ -3598,8 +3889,8 @@ struct TunnelEditSheet: View {
         case .existing(let id): groupId = id
         }
         return TunnelForm(
-            name: name.trimmingCharacters(in: .whitespaces), owner: owner.trimmingCharacters(in: .whitespaces),
-            target: target.trimmingCharacters(in: .whitespacesAndNewlines), port: port, whitelist: whitelist,
+            name: trimmedName, owner: owner.trimmingCharacters(in: .whitespaces),
+            target: composedTarget, port: port, whitelist: whitelist,
             durationMinutes: durationMinutes, idleCloseMinutes: idleCloseMinutes, maxBandwidthMB: maxBandwidthMB,
             groupId: groupId, newGroup: newGroup)
     }
@@ -3612,7 +3903,7 @@ struct TunnelEditSheet: View {
                 .font(.system(size: 15, weight: .bold))
 
             HStack(spacing: 12) {
-                field("通道名称") {
+                field(nameTitle) {
                     TextField(namePlaceholder, text: $name)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -3624,7 +3915,7 @@ struct TunnelEditSheet: View {
 
             targetSection
 
-            if !isBatch {
+            if isEdit {
                 field("对外监听端口 (范围 33001-34000)") {
                     HStack {
                         TextField("33660", text: $portString)
@@ -3660,54 +3951,147 @@ struct TunnelEditSheet: View {
             .padding(.top, 4)
         }
         .padding(20)
-        .frame(width: 490)
-        .onAppear {
-            if tunnel == nil {
-                Task {
-                    let p = await vm.recommendPort()
-                    if portString.isEmpty { portString = "\(p)" }
-                }
-            }
-        }
-        .task(id: "\(target)|\(name)|\(newGroupName)|\(groupChoice)") { await refreshPlan() }
+        .frame(width: 520)
+        .task(id: "\(composedTarget)|\(trimmedName)|\(groupChoice)") { await refreshPlan() }
+        .onChange(of: composedTarget) { _ in probes = [:] }
         .onChange(of: isBatch) { batch in
-            // 多个目标必须放进同一个通道组
+            // 多个地址放进同一个通道组；只剩一个地址时回到不分组
             if batch && groupChoice == .none { groupChoice = .new }
+            if !batch && !isEdit && groupChoice == .new { groupChoice = .none }
         }
     }
 
-    // MARK: Sections
+    // MARK: Target list
 
     var targetSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(isEdit ? "目标服务 (内网主机 IP:端口)" : "目标服务 (内网主机 IP:端口，可填多个)")
+        VStack(alignment: .leading, spacing: 6) {
+            Text(isEdit ? "目标服务 (内网主机与端口)" : "目标服务（每行一台主机，多个端口用逗号隔开）")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
-            HStack {
-                TextField(isEdit ? "例如 10.0.0.10:3306" : "例如 10.0.0.10:3306；多台主机写 10.0.1.11-13:22", text: $target)
-                    .textFieldStyle(.roundedBorder)
-                Button(isProbing ? "测试中" : "连通性测试") { probe() }
-                    .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty || isProbing || (mayBeMulti && planError != nil))
-                    .controlSize(.small)
+            if rows.count > 1 || !isEdit {
+                HStack(spacing: 8) {
+                    Text("主机").frame(maxWidth: .infinity, alignment: .leading)
+                    Text("端口").frame(width: 150, alignment: .leading)
+                    Color.clear.frame(width: 18, height: 1)
+                }
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
             }
-            if !probeMessage.isEmpty {
-                Text(verbatim: probeMessage)
-                    .font(.system(size: 11))
-                    .foregroundColor(probeOK ? .green : .red)
+            if isEdit, let row = rows.first {
+                HStack(spacing: 8) {
+                    targetRow(row)
+                    probeButton
+                }
+            } else {
+                ForEach(rows) { row in
+                    targetRow(row)
+                }
+                HStack(spacing: 10) {
+                    Button {
+                        addRow()
+                    } label: {
+                        Label("添加主机", systemImage: "plus")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("可以一次粘贴多个 IP（每行一个，或用逗号分隔），会自动拆成多行")
+                    Spacer()
+                    probeButton
+                }
             }
-            if mayBeMulti, let err = planError {
+            if isEdit {
+                if let r = probes[composedTarget] {
+                    Text(verbatim: r.ok ? "连接成功 (\(r.detail))" : "连接失败: \(r.detail)")
+                        .font(.system(size: 11))
+                        .foregroundColor(r.ok ? .green : .red)
+                }
+            } else if let err = planError {
                 Text(verbatim: err)
                     .font(.system(size: 11))
                     .foregroundColor(.red)
-            } else if isBatch {
+            } else if !plan.isEmpty {
                 planList
             }
         }
     }
 
-    /// 多个目标时：每个地址分到的访问端口
+    var probeButton: some View {
+        Button(isProbing ? "测试中" : "连通性测试") { probe() }
+            .disabled(composedTarget.isEmpty || isProbing || (!isEdit && (plan.isEmpty || planError != nil)))
+            .controlSize(.small)
+    }
+
+    func targetRow(_ row: TargetRow) -> some View {
+        HStack(spacing: 8) {
+            TextField(isEdit ? "例如 10.0.0.10" : "例如 10.0.1.11，可粘贴多个", text: hostBinding(row.id))
+                .textFieldStyle(.roundedBorder)
+                .focused($focusedRow, equals: row.id)
+            TextField(isEdit ? "3306" : "22, 3306", text: portsBinding(row.id))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 150)
+            if !isEdit {
+                Button {
+                    removeRow(row.id)
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 18)
+                .disabled(rows.count == 1)
+                .opacity(rows.count == 1 ? 0.3 : 1)
+                .help("删除这一行")
+            }
+        }
+    }
+
+    func hostBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { rows.first(where: { $0.id == id })?.host ?? "" },
+            set: { setHost(id, $0) }
+        )
+    }
+
+    func portsBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { rows.first(where: { $0.id == id })?.ports ?? "" },
+            set: { v in
+                if let i = rows.firstIndex(where: { $0.id == id }) { rows[i].ports = v }
+            }
+        )
+    }
+
+    /// 一次粘贴进多个主机（或 主机:端口）时拆成多行，其余情况照常输入
+    func setHost(_ id: UUID, _ value: String) {
+        guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
+        let pasted = value.count - rows[i].host.count > 1
+        if !isEdit && pasted && (TargetRow.items(value).count > 1 || TargetRow.splitHostPort(value) != nil) {
+            let parsed = TargetRow.parse(value, defaultPorts: rows[i].ports)
+            if !parsed.isEmpty {
+                rows.replaceSubrange(i...i, with: parsed)
+                return
+            }
+        }
+        rows[i].host = value
+    }
+
+    /// 新的一行沿用上一行的端口（同一组机器通常开同样的端口）
+    func addRow() {
+        let row = TargetRow(host: "", ports: rows.last?.ports ?? "")
+        rows.append(row)
+        focusedRow = row.id
+    }
+
+    func removeRow(_ id: UUID) {
+        guard rows.count > 1 else { return }
+        rows.removeAll { $0.id == id }
+    }
+
+    /// 每个地址分到的访问端口，以及连通性测试结果
     var planList: some View {
-        let shown = plan.prefix(6)
+        let shown = plan.prefix(8)
+        let failed = plan.filter { probes[$0.target]?.ok == false }.count
+        let tested = plan.filter { probes[$0.target] != nil }.count
         return VStack(alignment: .leading, spacing: 3) {
             ForEach(Array(shown)) { m in
                 HStack(spacing: 6) {
@@ -3720,16 +4104,38 @@ struct TunnelEditSheet: View {
                     Text(verbatim: m.target)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
+                    Spacer(minLength: 6)
+                    if let r = probes[m.target] {
+                        Label(r.ok ? r.detail : "不通", systemImage: r.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(r.ok ? .green : .red)
+                            .help(r.ok ? "连接成功" : "连接失败：\(r.detail)")
+                    }
                 }
             }
-            Text(verbatim: (plan.count > shown.count ? "… " : "") + "共 \(plan.count) 个地址，每个地址一个通道，访问端口自动连续分配")
+            Text(verbatim: planCaption(failed: failed, tested: tested, hidden: plan.count - shown.count))
                 .font(.system(size: 11))
-                .foregroundColor(.secondary)
+                .foregroundColor(failed > 0 ? .red : .secondary)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
     }
+
+    func planCaption(failed: Int, tested: Int, hidden: Int) -> String {
+        var parts: [String] = []
+        if hidden > 0 { parts.append("… 共 \(plan.count) 个地址") }
+        if tested == plan.count && failed == 0 {
+            parts.append(plan.count == 1 ? "目标连接成功" : "全部 \(plan.count) 个目标连接成功")
+        } else if failed > 0 {
+            parts.append("\(failed) 个目标连不上，鼠标停在 ✗ 上可查看原因")
+        } else {
+            parts.append(plan.count == 1 ? "访问端口自动分配" : "每个地址一个通道，访问端口自动连续分配")
+        }
+        return parts.joined(separator: "，")
+    }
+
+    // MARK: Sections
 
     var groupSection: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -3741,7 +4147,9 @@ struct TunnelEditSheet: View {
                     if !isBatch {
                         Text("不分组").tag(GroupChoice.none)
                     }
-                    Text("新建通道组").tag(GroupChoice.new)
+                    if isBatch || isEdit {
+                        Text("新建通道组").tag(GroupChoice.new)
+                    }
                     if !vm.groups.isEmpty {
                         Divider()
                         ForEach(vm.groups) { g in
@@ -3751,20 +4159,28 @@ struct TunnelEditSheet: View {
                 }
                 .labelsHidden()
                 .fixedSize()
-                if groupChoice == .new {
-                    TextField(name.trimmingCharacters(in: .whitespaces).isEmpty ? "通道组名称" : "组名，默认「\(name.trimmingCharacters(in: .whitespaces))」", text: $newGroupName)
+                if isEdit && groupChoice == .new {
+                    TextField(trimmedName.isEmpty ? "通道组名称" : "组名，默认「\(trimmedName)」", text: $newGroupName)
                         .textFieldStyle(.roundedBorder)
                 }
             }
-            if isBatch {
-                Text("多个地址会放进同一个通道组：共用邀请和授权，同事授权一次即可访问全部地址")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            } else if groupChoice != .none {
-                Text("组内通道共用邀请和授权，同事授权一次即可访问组内全部地址")
+            if let hint = groupHint {
+                Text(verbatim: hint)
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
+        }
+    }
+
+    var groupHint: String? {
+        switch groupChoice {
+        case .none:
+            return nil
+        case .new where isBatch:
+            let n = trimmedName.isEmpty ? "（填写上面的名称）" : "「\(trimmedName)」"
+            return "\(plan.count) 个地址会放进通道组\(n)：共用邀请和授权，同事授权一次即可访问全部地址"
+        default:
+            return "组内通道共用邀请和授权，同事授权一次即可访问组内全部地址"
         }
     }
 
@@ -3853,7 +4269,7 @@ struct TunnelEditSheet: View {
     // MARK: Actions
 
     func refreshPlan() async {
-        guard mayBeMulti else {
+        guard !isEdit, !composedTarget.isEmpty else {
             plan = []
             planError = nil
             return
@@ -3868,12 +4284,10 @@ struct TunnelEditSheet: View {
     }
 
     func probe() {
-        let targets = isBatch ? plan.map { $0.target } : [target.trimmingCharacters(in: .whitespaces)]
+        let targets = isEdit ? [composedTarget] : plan.map { $0.target }
         isProbing = true
         Task {
-            let (ok, msg) = await vm.probeTargets(targets)
-            probeOK = ok
-            probeMessage = msg
+            probes = await vm.probeAll(targets)
             isProbing = false
         }
     }
@@ -3901,17 +4315,20 @@ struct TunnelEditSheet: View {
 
     func save() {
         var port = 0
-        if !isBatch {
+        if isEdit {
             guard let p = Int(portString), p > 33000 && p <= 34000 else {
                 errorMessage = "端口须在 33001-34000 范围内"
+                return
+            }
+            guard !composedTarget.contains(",") else {
+                errorMessage = "一个通道只对应一个目标端口；要开放更多端口，请用「添加通道」"
                 return
             }
             port = p
         }
         guard let wl = whitelist() else { return }
         let form = makeForm(port: port, whitelist: wl)
-        var joinsExisting = false
-        if case .existing = groupChoice { joinsExisting = true }
+        let joinsExisting = existingGroupName != nil
         isSaving = true
         errorMessage = nil
         Task {
@@ -4496,13 +4913,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             tunnelSection.isEnabled = false
             menu.addItem(tunnelSection)
 
+            // 通道组占一行（出现在它第一个成员的位置），子菜单里整组开关、逐个地址开关
+            var seenGroups = Set<String>()
             for t in vm.tunnels {
-                let check = t.enabled ? "✓ " : "   "
-                let title = "\(check)\(t.name) (:\(t.listen_port))"
-                let item = NSMenuItem(title: title, action: #selector(toggleTunnelAction(_:)), keyEquivalent: "")
-                item.representedObject = t.id
-                item.target = self
-                menu.addItem(item)
+                if let g = vm.group(t.group_id) {
+                    if seenGroups.insert(g.id).inserted {
+                        menu.addItem(groupMenuItem(g, members: vm.members(of: g)))
+                    }
+                } else {
+                    menu.addItem(tunnelMenuItem(t, title: "\(t.name) (:\(t.listen_port))"))
+                }
             }
         }
 
@@ -4524,6 +4944,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(quitItem)
 
         self.statusItem?.menu = menu
+    }
+
+    func tunnelMenuItem(_ t: TunnelItem, title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: (t.enabled ? "✓ " : "   ") + title, action: #selector(toggleTunnelAction(_:)), keyEquivalent: "")
+        item.representedObject = t.id
+        item.target = self
+        return item
+    }
+
+    func groupMenuItem(_ g: GroupItem, members: [TunnelItem]) -> NSMenuItem {
+        let on = members.filter { $0.enabled }.count
+        let state = on > 0 && on < members.count ? "，\(on) 个开启" : ""
+        let item = NSMenuItem(title: (on > 0 ? "✓ " : "   ") + "\(g.name)（\(members.count) 个地址\(state)）", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let toggle = NSMenuItem(title: on > 0 ? "关闭整组" : "开启整组", action: #selector(toggleGroupAction(_:)), keyEquivalent: "")
+        toggle.representedObject = [g.id, on > 0 ? "off" : "on"]
+        toggle.target = self
+        sub.addItem(toggle)
+        sub.addItem(NSMenuItem.separator())
+        for t in members {
+            sub.addItem(tunnelMenuItem(t, title: ":\(t.listen_port) → \(t.target)"))
+        }
+        item.submenu = sub
+        return item
+    }
+
+    @objc func toggleGroupAction(_ sender: NSMenuItem) {
+        guard let v = sender.representedObject as? [String], v.count == 2 else { return }
+        Task {
+            await PortRelayViewModel.shared.toggleGroup(id: v[0], enabled: v[1] == "on")
+        }
     }
 
     @objc func toggleTunnelAction(_ sender: NSMenuItem) {
