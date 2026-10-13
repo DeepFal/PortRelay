@@ -1,0 +1,17 @@
+# 用法：PORTRELAY_TOKEN=$(openssl rand -hex 24) docker compose up -d
+services:
+  portrelay:
+    image: ghcr.io/deepfal/portrelay-server:latest
+    # 或者从源码构建：
+    # build: ..
+    # host 网络保留访问者的真实 IP（白名单依赖它），也免去映射 1000 个端口
+    network_mode: host
+    environment:
+      PORTRELAY_TOKEN: ${PORTRELAY_TOKEN:?请设置 PORTRELAY_TOKEN}
+    # command: ["-listen", ":33000", "-port-min", "33000", "-port-max", "34000", "-state", "/var/lib/portrelay/leases.json", "-public-host", "gw.example.com"]
+    volumes:
+      - portrelay-state:/var/lib/portrelay
+    restart: unless-stopped
+
+volumes:
+  portrelay-state:

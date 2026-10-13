@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="PortRelay 架构：访问者连接边缘网关的端口，Agent 通过一条主动外连的隧道把流量转发到内网目标服务">
+  <style>
+    svg {
+      --bg: #f8fafc; --zone: #cbd5e1; --label: #64748b; --box: #ffffff; --stroke: #e2e8f0;
+      --text: #0f172a; --sub: #64748b; --accent: #2563eb; --pill: #eff6ff; --green: #16a34a;
+      --orange: #ea580c; --red: #dc2626; --pipe: #94a3b8; --wire: #cbd5e1;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --bg: #0d1117; --zone: #30363d; --label: #8b949e; --box: #161b22; --stroke: #30363d;
+        --text: #e6edf3; --sub: #8b949e; --accent: #58a6ff; --pill: #1b2738; --green: #3fb950;
+        --orange: #f0883e; --red: #f85149; --pipe: #6e7681; --wire: #30363d;
+      }
+    }
+    .bg { fill: var(--bg); }
+    .zone { fill: none; stroke: var(--zone); stroke-width: 1.5; stroke-dasharray: 6 6; }
+    .zlabel { fill: var(--label); font-size: 12px; font-weight: 600; letter-spacing: .5px; }
+    .box { fill: var(--box); stroke: var(--stroke); stroke-width: 1.5; }
+    .title { fill: var(--text); font-size: 15px; font-weight: 700; }
+    .t { fill: var(--text); font-size: 13px; font-weight: 600; }
+    .sub { fill: var(--sub); font-size: 11.5px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .pill { fill: var(--pill); }
+    .pt { fill: var(--accent); font-size: 11.5px; font-weight: 600; }
+    .wire { fill: none; stroke: var(--wire); stroke-width: 1.5; }
+    .pipe { fill: none; stroke: var(--pipe); stroke-width: 1.5; }
+    .flow { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 4 10; opacity: .55; }
+    .ok { fill: var(--green); }
+    .warn { fill: var(--orange); }
+    .bad { fill: var(--red); }
+    .badl { stroke: var(--red); stroke-width: 2.5; stroke-linecap: round; }
+    .acc { fill: var(--accent); }
+    .glow { fill: var(--accent); opacity: .18; }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="960" height="400" rx="16"/>
+
+  <!-- 网络区域 -->
+  <rect class="zone" x="20" y="40" width="440" height="340" rx="14"/>
+  <text class="zlabel" x="36" y="64">访问者所在网络 · 办公网 / 局域网 / 公网</text>
+  <rect class="zone" x="600" y="40" width="340" height="340" rx="14"/>
+  <text class="zlabel" x="616" y="64">目标内网</text>
+
+  <!-- 连线 -->
+  <path class="wire" d="M184,121 C216,121 216,201 248,201"/>
+  <path class="wire" d="M184,210 C216,210 216,167 248,167"/>
+  <path class="wire" d="M184,299 C214,299 214,269 240,269"/>
+  <path class="wire" d="M758,210 C774,210 774,112 790,112"/>
+  <path class="wire" d="M758,210 L790,210"/>
+  <path class="wire" d="M758,210 C774,210 774,308 790,308"/>
+
+  <!-- 数据包：请求（蓝）与响应（绿） -->
+  <path id="req" d="M184,121 C216,121 216,201 248,201 L428,210 L628,210 L758,210 C774,210 774,112 790,112" fill="none"/>
+  <path id="resp" d="M790,112 C774,112 774,210 758,210 L628,210 L428,210 L248,201 C216,201 216,121 184,121" fill="none"/>
+  <circle class="acc" r="4.5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="0s"><mpath xlink:href="#req"/></animateMotion></circle>
+  <circle class="acc" r="4.5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-1.07s"><mpath xlink:href="#req"/></animateMotion></circle>
+  <circle class="acc" r="4.5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-2.13s"><mpath xlink:href="#req"/></animateMotion></circle>
+  <circle class="ok" r="4.5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-0.53s"><mpath xlink:href="#resp"/></animateMotion></circle>
+  <circle class="ok" r="4.5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-1.6s"><mpath xlink:href="#resp"/></animateMotion></circle>
+  <circle class="ok" r="4.5"><animateMotion dur="3.2s" repeatCount="indefinite" begin="-2.67s"><mpath xlink:href="#resp"/></animateMotion></circle>
+
+  <!-- 手机打开邀请链接（橙） -->
+  <path id="auth" d="M184,210 C216,210 216,167 262,167" fill="none"/>
+  <circle class="warn" r="4.5">
+    <animateMotion dur="4s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.4;1" calcMode="linear"><mpath xlink:href="#auth"/></animateMotion>
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.4;.45;1" dur="4s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- 陌生设备被拦截（红） -->
+  <path id="deny" d="M184,299 C214,299 214,269 240,269" fill="none"/>
+  <circle class="bad" r="4.5">
+    <animateMotion dur="3s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;.55;1" calcMode="linear"><mpath xlink:href="#deny"/></animateMotion>
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.55;.58;1" dur="3s" repeatCount="indefinite"/>
+  </circle>
+  <g opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;.55;.58;.9;1" dur="3s" repeatCount="indefinite"/>
+    <path class="badl" d="M232,261 l14,14 M246,261 l-14,14"/>
+  </g>
+
+  <!-- 访问者 -->
+  <rect class="box" x="44" y="92" width="140" height="58" rx="10"/>
+  <circle class="ok" cx="60" cy="112" r="4"/>
+  <text class="t" x="70" y="116">张三的电脑</text>
+  <text class="sub mono" x="58" y="137">192.168.1.21 已授权</text>
+
+  <rect class="box" x="44" y="181" width="140" height="58" rx="10"/>
+  <circle class="warn" cx="60" cy="201" r="4"/>
+  <text class="t" x="70" y="205">手机扫码申请</text>
+  <text class="sub mono" x="58" y="226">/i/k7m2xq9fpa</text>
+
+  <rect class="box" x="44" y="270" width="140" height="58" rx="10"/>
+  <circle class="bad" cx="60" cy="290" r="4"/>
+  <text class="t" x="70" y="294">陌生设备</text>
+  <text class="sub" x="58" y="315">未授权 · 直接拦截</text>
+
+  <!-- 边缘网关 -->
+  <rect class="box" x="248" y="92" width="180" height="236" rx="12"/>
+  <text class="title" x="264" y="120">边缘网关</text>
+  <text class="sub mono" x="264" y="138">portrelay-server</text>
+  <rect class="pill" x="262" y="154" width="152" height="26" rx="6"/>
+  <text class="pt mono" x="272" y="171">:33000 控制 · 授权页</text>
+  <rect class="pill" x="262" y="188" width="152" height="26" rx="6">
+    <animate attributeName="opacity" values="1;.55;1" dur="3.2s" repeatCount="indefinite"/>
+  </rect>
+  <text class="pt mono" x="272" y="205">:33660 → MySQL</text>
+  <rect class="pill" x="262" y="222" width="152" height="26" rx="6"/>
+  <text class="pt mono" x="272" y="239">:33661 → Grafana</text>
+  <rect class="pill" x="262" y="256" width="152" height="26" rx="6"/>
+  <text class="pt mono" x="272" y="273">:33662 → SSH</text>
+  <path class="acc" d="M268,296 l8,-3 l8,3 v6 c0,5 -4,8 -8,10 c-4,-2 -8,-5 -8,-10 z" opacity=".85"/>
+  <text class="sub" x="290" y="309">白名单 · 授权租约</text>
+
+  <!-- 隧道：Agent 主动外连，单条 TCP + yamux 多路复用 -->
+  <path class="pipe" d="M428,203 L628,203"/>
+  <path class="pipe" d="M428,217 L628,217"/>
+  <path class="flow" d="M628,210 L428,210">
+    <animate attributeName="stroke-dashoffset" from="0" to="-28" dur="1s" repeatCount="indefinite"/>
+  </path>
+  <text class="t" x="528" y="190" text-anchor="middle">Agent 主动外连</text>
+  <text class="sub" x="528" y="240" text-anchor="middle">任意连通方式</text>
+  <text class="sub" x="528" y="257" text-anchor="middle">局域网 · VPN · Tailscale</text>
+  <text class="sub" x="528" y="273" text-anchor="middle">ZeroTier · WireGuard · 公网</text>
+
+  <!-- Agent -->
+  <rect class="glow" x="620" y="152" width="146" height="116" rx="16">
+    <animate attributeName="opacity" values=".08;.22;.08" dur="2.4s" repeatCount="indefinite"/>
+  </rect>
+  <rect class="box" x="628" y="160" width="130" height="100" rx="12"/>
+  <text class="title" x="644" y="190">Agent</text>
+  <text class="sub" x="644" y="212">macOS App</text>
+  <text class="sub" x="644" y="230">Linux / Windows</text>
+  <text class="sub" x="644" y="246">命令行同样可用</text>
+
+  <!-- 内网目标 -->
+  <rect class="box" x="790" y="84" width="130" height="56" rx="10"/>
+  <text class="t" x="806" y="108">MySQL</text>
+  <text class="sub mono" x="806" y="127">10.0.1.16:3306</text>
+  <rect class="box" x="790" y="182" width="130" height="56" rx="10"/>
+  <text class="t" x="806" y="206">Grafana</text>
+  <text class="sub mono" x="806" y="225">10.0.2.30:3000</text>
+  <rect class="box" x="790" y="280" width="130" height="56" rx="10"/>
+  <text class="t" x="806" y="304">SSH</text>
+  <text class="sub mono" x="806" y="323">10.0.8.3:22</text>
+
+</svg>

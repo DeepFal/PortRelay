@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (vet / test / cross-build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -count=1 ./...
+      - name: cross-build
+        run: |
+          for p in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            GOOS=${p%/*} GOARCH=${p#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/...
+          done
+
+  install:
+    name: Install script (systemd)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: CGO_ENABLED=0 go build -o portrelay-server ./cmd/portrelay-server
+      - name: Install
+        run: sudo deploy/install-server.sh ./portrelay-server
+      - name: Verify
+        run: |
+          sleep 2
+          systemctl is-active portrelay-server
+          sudo test -s /etc/portrelay-server.env
+          test "$(sudo stat -c %a /etc/portrelay-server.env)" = 600
+          curl -fsS http://127.0.0.1:33000/health
+          sudo deploy/install-server.sh ./portrelay-server   # 升级路径：保留已有 token
+          sleep 2
+          systemctl is-active portrelay-server
+          ls /usr/local/bin/portrelay-server.bak-*
+      - name: Logs
+        if: always()
+        run: sudo journalctl -u portrelay-server --no-pager | tail -30
+
+  macos:
+    name: macOS app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build PortRelay.app (universal)
+        run: UNIVERSAL=1 ./build-app.sh
+      - name: Check bundle
+        run: |
+          lipo -info PortRelay.app/Contents/MacOS/PortRelay
+          lipo -info PortRelay.app/Contents/Resources/portrelay-agent
+          codesign --verify --deep PortRelay.app
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: portrelay-server:ci

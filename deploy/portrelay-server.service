@@ -1,0 +1,30 @@
+[Unit]
+Description=PortRelay edge gateway
+Documentation=https://github.com/DeepFal/PortRelay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# PORTRELAY_TOKEN 等配置写在这里（权限 0600），参考 portrelay-server.env.example
+EnvironmentFile=/etc/portrelay-server.env
+ExecStart=/usr/local/bin/portrelay-server -listen :33000 -port-min 33000 -port-max 34000 -state /var/lib/portrelay/leases.json $PORTRELAY_ARGS
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+# 以临时系统用户运行，状态保存在 /var/lib/portrelay
+DynamicUser=yes
+StateDirectory=portrelay
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

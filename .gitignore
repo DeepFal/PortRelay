@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# 构建产物
+bin/
+build/
+dist/
+PortRelay.app/
+mac-native/PortRelay
+mac-native/test_bin
+mac-native/test_app_bin
+
+# UI 快照工具的构建产物与输出
+tools/ui-snapshots/.build/
+tools/ui-snapshots/out/
+
+# 本地配置与密钥
+*.env
+!deploy/*.env.example

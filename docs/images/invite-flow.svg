@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 210" width="960" height="210" role="img" aria-label="邀请流程：生成邀请链接、同事打开链接填写姓名、可选的管理员审批、首次连接开始计时、到期自动断开">
+  <style>
+    svg {
+      --bg: #f8fafc; --track: #e2e8f0; --ring: #cbd5e1; --base: #ffffff; --text: #0f172a; --sub: #64748b; --accent: #2563eb; --on: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg { --bg: #0d1117; --track: #21262d; --ring: #30363d; --base: #161b22; --text: #e6edf3; --sub: #8b949e; --accent: #58a6ff; --on: #0d1117; }
+    }
+    .bg { fill: var(--bg); }
+    .track { stroke: var(--track); stroke-width: 4; stroke-linecap: round; }
+    .progress { stroke: var(--accent); stroke-width: 4; stroke-linecap: round; stroke-dasharray: 740; stroke-dashoffset: 740; animation: progress 10s linear infinite; }
+    .ring { fill: var(--base); stroke: var(--ring); stroke-width: 2; }
+    .ring.optional { stroke-dasharray: 4 4; }
+    .num { fill: var(--sub); font-size: 15px; font-weight: 700; }
+    .dot { fill: var(--accent); }
+    .numon { fill: var(--on); font-size: 15px; font-weight: 700; }
+    .title { fill: var(--text); font-size: 14px; font-weight: 700; }
+    .sub { fill: var(--sub); font-size: 12px; }
+    .tag { fill: var(--accent); font-size: 10.5px; font-weight: 600; }
+    @keyframes progress { 0% { stroke-dashoffset: 740; } 80%, 96% { stroke-dashoffset: 0; opacity: 1; } 100% { stroke-dashoffset: 0; opacity: 0; } }
+    @keyframes on1 { 0%, 96% { opacity: 1; } 100% { opacity: 0; } }
+    .on1 { animation: on1 10s linear infinite; }
+    @keyframes on2 { 0%, 19% { opacity: 0; } 21%, 96% { opacity: 1; } 100% { opacity: 0; } }
+    .on2 { animation: on2 10s linear infinite; }
+    @keyframes on3 { 0%, 39% { opacity: 0; } 41%, 96% { opacity: 1; } 100% { opacity: 0; } }
+    .on3 { animation: on3 10s linear infinite; }
+    @keyframes on4 { 0%, 59% { opacity: 0; } 61%, 96% { opacity: 1; } 100% { opacity: 0; } }
+    .on4 { animation: on4 10s linear infinite; }
+    @keyframes on5 { 0%, 79% { opacity: 0; } 81%, 96% { opacity: 1; } 100% { opacity: 0; } }
+    .on5 { animation: on5 10s linear infinite; }
+  </style>
+  <rect class="bg" x="0" y="0" width="960" height="210" rx="16"/>
+  <line class="track" x1="110" y1="62" x2="850" y2="62"/>
+  <line class="progress" x1="110" y1="62" x2="850" y2="62"/>
+  <circle class="ring" cx="110" cy="62" r="20"/>
+  <text class="num" x="110" y="67.5" text-anchor="middle">1</text>
+  <g class="on1">
+    <circle class="dot" cx="110" cy="62" r="20"/>
+    <text class="numon" x="110" y="67.5" text-anchor="middle">1</text>
+  </g>
+  <text class="title" x="110" y="116" text-anchor="middle">生成邀请链接</text>
+  <text class="sub" x="110" y="140" text-anchor="middle">有效期 · 设备数</text>
+  <text class="sub" x="110" y="160" text-anchor="middle">访问时长 · 是否审批</text>
+  <circle class="ring" cx="295" cy="62" r="20"/>
+  <text class="num" x="295" y="67.5" text-anchor="middle">2</text>
+  <g class="on2">
+    <circle class="dot" cx="295" cy="62" r="20"/>
+    <text class="numon" x="295" y="67.5" text-anchor="middle">2</text>
+  </g>
+  <text class="title" x="295" y="116" text-anchor="middle">同事打开链接</text>
+  <text class="sub" x="295" y="140" text-anchor="middle">填写姓名即可</text>
+  <text class="sub" x="295" y="160" text-anchor="middle">手机扫码也可以</text>
+  <circle class="ring optional" cx="480" cy="62" r="20"/>
+  <text class="num" x="480" y="67.5" text-anchor="middle">3</text>
+  <g class="on3">
+    <circle class="dot" cx="480" cy="62" r="20"/>
+    <text class="numon" x="480" y="67.5" text-anchor="middle">3</text>
+  </g>
+  <text class="title" x="480" y="116" text-anchor="middle">管理员审批</text>
+  <text class="sub" x="480" y="140" text-anchor="middle">App 弹出通知提醒</text>
+  <text class="sub" x="480" y="160" text-anchor="middle">一键批准或拒绝</text>
+  <text class="tag" x="480" y="28" text-anchor="middle">可选</text>
+  <circle class="ring" cx="665" cy="62" r="20"/>
+  <text class="num" x="665" y="67.5" text-anchor="middle">4</text>
+  <g class="on4">
+    <circle class="dot" cx="665" cy="62" r="20"/>
+    <text class="numon" x="665" y="67.5" text-anchor="middle">4</text>
+  </g>
+  <text class="title" x="665" y="116" text-anchor="middle">首次连接起计时</text>
+  <text class="sub" x="665" y="140" text-anchor="middle">2 小时 / 8 小时 / 当天</text>
+  <text class="sub" x="665" y="160" text-anchor="middle">或直到通道关闭</text>
+  <circle class="ring" cx="850" cy="62" r="20"/>
+  <text class="num" x="850" y="67.5" text-anchor="middle">5</text>
+  <g class="on5">
+    <circle class="dot" cx="850" cy="62" r="20"/>
+    <text class="numon" x="850" y="67.5" text-anchor="middle">5</text>
+  </g>
+  <text class="title" x="850" y="116" text-anchor="middle">到期自动断开</text>
+  <text class="sub" x="850" y="140" text-anchor="middle">已建立的连接一并断开</text>
+  <text class="sub" x="850" y="160" text-anchor="middle">闲置的通道自动关闭</text>
+</svg>
