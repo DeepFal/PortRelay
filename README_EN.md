@@ -54,18 +54,18 @@ PortRelay turns that into three steps:
 **Access control**
 
 - Three access modes: **invite-only** (the default and safest), an IP / CIDR allowlist (which can be combined with invites), and open to all.
-- Each invite link has its own expiry, device limit, access duration once granted (30 min, 1 h, 2 h, 8 h, until end of day, until the tunnel closes, or a custom length) and an optional approval step.
+- Each invite link has its own expiry, device limit, access duration once granted (30 min, 1 h, 2 h, 8 h, until end of day, while the tunnel stays open, or a custom length) and an optional approval step.
 - When approval is required, the app shows a system notification and you approve or deny with one click. The requester's page refreshes on its own.
 - **The access clock starts at the first connection**, so a teammate can accept an invite now and use it later.
 - When access expires or is revoked, **existing connections are dropped too**. Unauthorized connections are reset (TCP RST) and logged.
-- **Extensions.** Within two hours after access ends (even if the tunnel has been closed), a teammate reopens the original link and clicks 申请延长 (Request extension). You approve it by picking a duration in the app, the menu bar or the web panel, and a closed tunnel reopens on its own. You can also extend a running or just-ended grant yourself.
+- **Extensions.** A teammate reopens the original invite link and clicks 申请延长 (Request extension); you approve by picking a duration in the app, the menu bar or the web panel. A grant that is still running is extended from its current expiry. One that has ended starts again from the moment you approve; that works for up to two hours after it ended, even if the tunnel has been closed, and the tunnel reopens on approval. Revoked grants cannot be extended. You can also extend a running or just-ended grant yourself.
 - **Tunnel groups**: the add-tunnel form takes a list of targets, one host per row with comma-separated ports (a pasted list of IPs is split into rows), creates one tunnel per address on a contiguous block of gateway ports and puts them in one group. A group shares one invite link and one set of grants: a teammate is authorized once for the whole group, and one revoke disconnects them everywhere.
 
 **Tunnel lifecycle**
 
 - **Idle auto-close.** The idle timer starts when a tunnel has no connections, no active grants, no pending requests and no invite links with uses left. By default the tunnel closes after 30 minutes of idle time.
-- An optional **maximum open time** closes the tunnel at a fixed point, whether or not it is in use.
-- While any address in a group is in use, the whole group counts as in use; members are switched on and off together.
+- An optional **maximum open time** closes the tunnel at a fixed point, whether or not it is in use. If you approve an extension that runs past that point, the tunnel stays open until the grant ends.
+- Idle time is counted per group: while any address is in use, none of them is closed for being idle, and when the group does go idle it closes as a whole. Each address can still be switched on or off on its own.
 - PortRelay records the first-connection time, the actual connected time and why each tunnel was closed.
 - Editing a tunnel keeps existing connections. Moving a tunnel binds the new port before releasing the old one.
 
@@ -107,13 +107,23 @@ PortRelay turns that into three steps:
   </tr>
 </table>
 
+When access is about to run out or has just ended, the teammate opens the same link again, sees where their access stands and asks for more time. Once you pick a duration, the page shows the new expiry.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/auth-renew.png" alt="Request an extension" width="100%"><br><sub>④ Reopen the link and request an extension</sub></td>
+    <td align="center"><img src="docs/images/auth-renew-pending.png" alt="Waiting for the extension" width="100%"><br><sub>⑤ Wait while you choose a duration</sub></td>
+    <td align="center"><img src="docs/images/auth-renew-ok.png" alt="Extension approved" width="100%"><br><sub>⑥ Extension approved</sub></td>
+  </tr>
+</table>
+
 **Tunnel groups.** A group card sums up the state and traffic of the whole group and lists every access address. Each address can be switched, invited or moved out on its own.
 
 <p align="center">
   <img src="docs/images/app-group.png" alt="Tunnel group" width="100%">
 </p>
 
-**Access management.** Pending requests, authorized devices (with online state and remaining time) and active invite links are all managed in one place.
+**Access management.** Access and extension requests, authorized devices (with online state and remaining time), recently ended grants and active invite links all live here. Extending a device takes one pick of a duration, with no new link to send.
 
 <p align="center">
   <img src="docs/images/app-access.png" alt="Access management" width="80%">
@@ -219,10 +229,10 @@ Open ⚙️ Settings and fill in:
 ### 3. Create a tunnel and invite someone
 
 1. Click **添加通道** (Add tunnel) and enter a name, a target host and port such as `10.0.1.16` and `3306`. You can probe the target from your machine first; the gateway port is assigned automatically.
-2. Keep the default access mode, **仅授权链接** (invite-only). Click **邀请** (Invite), then choose how long access lasts, how many devices may use the link, and whether approval is required.
+2. Keep the default access mode, **仅授权链接** (invite-only). After you save, the invite form opens: choose how long access lasts, how many devices may use the link, and whether approval is required. To send another invite later, click **邀请** (Invite) on the tunnel card.
 3. Send the generated message or QR code. Once the teammate has entered their name, they can connect their database client or SSH to `192.168.1.10:33660`.
 
-To open several hosts at once (a set of servers, say), use the same **添加通道** (Add tunnel) form with one host per row (comma-separated ports; you can paste a list of IPs). The form previews the port mapping and puts the addresses in a new tunnel group; idle close, bandwidth and access settings apply to every address. Then click **邀请整组** (Invite group). To add addresses later, click **添加地址** (Add address) on the group card; an existing tunnel can join a group from its edit form. A group's connections and history can be viewed by device or by address.
+To open several hosts at once (a set of servers, say), use the same **添加通道** (Add tunnel) form with one host per row (comma-separated ports; you can paste a list of IPs). The form previews the port mapping and puts the addresses in a new tunnel group; idle close, bandwidth and access settings apply to every address. The invite form that opens after creation covers the whole group. To add addresses later, click **添加地址** (Add address) on the group card; an existing tunnel can join a group from its edit form. A group's connections and history can be viewed by device or by address.
 
 ## Configuration
 
@@ -315,6 +325,7 @@ make agent        # build the agent for this platform into bin/
 make app          # build PortRelay.app (UNIVERSAL=1 ./build-app.sh for a universal binary)
 make release      # package gateway + agent for all platforms into dist/
 make snapshots    # render app screens offscreen into tools/ui-snapshots/out/
+make readme-images  # regenerate every README screenshot and animation in docs/images/
 ```
 
 ```text
@@ -325,13 +336,10 @@ client/                agent: config, tunnels, local API, idle close, traffic st
 core/                  protocol messages, ACL, traffic metering and rate limiting
 mac-native/            SwiftUI menu-bar app
 deploy/                systemd and Docker Compose examples, install script
-tools/ui-snapshots/    offscreen screenshot renderer and README GIF builder (mkgif)
+tools/ui-snapshots/    README images: offscreen app rendering, web screenshots, GIF encoding
 ```
 
-All screenshots and animations in this README come from mock data:
-- `tools/ui-snapshots/render.sh readme` renders the screenshots;
-- `FRAMES=40 tools/ui-snapshots/render.sh gif` renders the animation frames;
-- `go run ./tools/ui-snapshots/mkgif` encodes the frames as a GIF.
+All screenshots and animations in this README use mock data. After a UI change, run `make readme-images` to regenerate them (Google Chrome required). App screens are rendered offscreen, the animation is encoded from rendered frames, and the invite pages and web panel are captured with headless Chrome.
 
 Issues and pull requests are welcome. Please run `make test` before submitting.
 

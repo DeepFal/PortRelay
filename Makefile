@@ -7,6 +7,7 @@
 #   make dmg         打包 macOS 安装镜像 dist/PortRelay-<版本>.dmg（UNIVERSAL=1 构建通用版本）
 #   make release     打包服务端（Linux）与命令行 Agent（Linux / Windows）到 dist/
 #   make snapshots   离屏渲染 App 界面截图（tools/ui-snapshots/out）
+#   make readme-images 重新生成 README 的全部截图和动图到 docs/images（需要 Google Chrome）
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -16,7 +17,7 @@ GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
 SERVER_PLATFORMS := linux/amd64 linux/arm64
 AGENT_PLATFORMS := linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: all test fmt server agent app install-app dmg release snapshots clean
+.PHONY: all test fmt server agent app install-app dmg release snapshots readme-images clean
 
 all: test agent
 
@@ -79,6 +80,9 @@ release:
 
 snapshots:
 	tools/ui-snapshots/render.sh
+
+readme-images:
+	tools/ui-snapshots/readme.sh
 
 clean:
 	rm -rf bin build dist PortRelay.app mac-native/PortRelay tools/ui-snapshots/.build tools/ui-snapshots/out

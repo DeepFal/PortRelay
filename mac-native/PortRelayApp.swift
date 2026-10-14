@@ -397,10 +397,11 @@ func formatSecondsToDuration(_ totalSec: Int64) -> String {
     let hours = totalSec / 3600
     let mins = (totalSec % 3600) / 60
     let secs = totalSec % 60
+    // 第二个单位补零，计时跳动时文字宽度不变
     if hours > 0 {
-        return "\(hours)小时\(mins)分"
+        return "\(hours)小时" + String(format: "%02d分", mins)
     } else if mins > 0 {
-        return "\(mins)分\(secs)秒"
+        return "\(mins)分" + String(format: "%02d秒", secs)
     } else {
         return "\(secs)秒"
     }
@@ -1557,6 +1558,7 @@ class PortRelayViewModel: ObservableObject {
             lines.append("请在 \(fmt.string(from: deadline)) 前用浏览器打开下面的链接，\(action)（访问有效期：\(leaseDurationTitle(leaseDuration))）：")
             lines.append(link)
             lines.append("此链接仅限 1 台设备使用，请勿转发。")
+            lines.append("授权结束后 2 小时内，可以重新打开此链接申请延长。")
             let text = lines.joined(separator: "\n")
             return (InviteShareResp(invite: InviteItem(code: "k7m2xq9fpa", note: note, created_at: "", expires_at: "", max_uses: maxUses, lease_duration: leaseDuration, require_approval: requireApproval, uses: nil), link: link, share_text: text), nil)
         }
@@ -3702,7 +3704,7 @@ struct ClientDetailsSheet: View {
                                             .font(.system(size: 12, design: .monospaced))
                                             .foregroundColor(.accentColor)
                                     }
-                                    Text(verbatim: "申请于 \(formatDateTimeShort(r.at)) · 批准后可访问 \(leaseDurationTitle(invites.first { $0.code == r.invite }?.lease_duration))")
+                                    Text(verbatim: "申请于 \(formatClock(r.at)) · 批准后可访问 \(leaseDurationTitle(invites.first { $0.code == r.invite }?.lease_duration))")
                                         .font(.system(size: 11))
                                         .foregroundColor(.secondary)
                                         .lineLimit(1)

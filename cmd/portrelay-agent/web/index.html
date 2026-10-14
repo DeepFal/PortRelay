@@ -747,7 +747,8 @@
     const fmtSecs = secs => {
       secs = Math.max(0, Math.floor(secs || 0));
       const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), sec = secs % 60;
-      return h > 0 ? `${h}小时${m}分` : (m > 0 ? `${m}分${sec}秒` : `${sec}秒`);
+      const pad = n => String(n).padStart(2, '0');
+      return h > 0 ? `${h}小时${pad(m)}分` : (m > 0 ? `${m}分${pad(sec)}秒` : `${sec}秒`);
     };
     const fmtMinutes = m => m >= 1440 && m % 1440 === 0 ? `${m / 1440} 天`
       : (m >= 60 && m % 60 === 0 ? `${m / 60} 小时` : (m > 60 ? `${Math.floor(m / 60)} 小时 ${m % 60} 分钟` : `${m} 分钟`));

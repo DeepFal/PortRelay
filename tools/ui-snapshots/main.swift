@@ -205,6 +205,8 @@ func makeDemoVM(tick: Int = 0) -> PortRelayViewModel {
 final class KeyWindow: NSWindow {
     override var isKeyWindow: Bool { true }
     override var isMainWindow: Bool { true }
+    /// 渲染进程不会被激活，AppKit 控件（开关、分段控件）按这个私有属性决定是否画成灰色
+    @objc(hasKeyAppearance) func alwaysHasKeyAppearance() -> Bool { true }
 }
 
 @MainActor
@@ -256,12 +258,11 @@ MainActor.assumeIsolated {
     let demo = makeDemoVM()
     render("readme-main-light", CGSize(width: 980, height: 1180), ContentView(vm: demo))
     render("readme-main-dark", CGSize(width: 980, height: 1180), dark: true, ContentView(vm: demo))
-    render("readme-invite", CGSize(width: 560, height: 250), InviteSheet(vm: demo, tunnel: demo.tunnels[0], autoGenerate: true, isPresented: yes))
+    render("readme-invite", CGSize(width: 600, height: 270), InviteSheet(vm: demo, tunnel: demo.tunnels[0], autoGenerate: true, isPresented: yes))
     render("readme-clients", CGSize(width: 760, height: 560), ClientDetailsSheet(vm: demo, tunnel: demo.tunnels[0], initialTab: 0, isPresented: yes))
-    render("readme-access", CGSize(width: 760, height: 490), ClientDetailsSheet(vm: demo, tunnel: demo.tunnels[0], initialTab: 2, isPresented: yes))
-    render("readme-edit", CGSize(width: 520, height: 760), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[0], isPresented: yes))
+    render("readme-edit", CGSize(width: 520, height: 570), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[0], isPresented: yes))
     let g = demo.groups[0]
-    render("group-card", CGSize(width: 980, height: 330), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
+    render("readme-group", CGSize(width: 980, height: 330), GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
         onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
     render("group-card-dark", CGSize(width: 980, height: 330), dark: true, GroupCardView(group: g, members: demo.members(of: g), visible: demo.members(of: g), vm: demo,
         onEdit: {}, onAddMember: {}, onInvite: {}, onViewClients: { _ in }, onEditMember: { _ in }, onInviteMember: { _ in }, onMemberClients: { _ in }).padding(20))
@@ -284,11 +285,11 @@ MainActor.assumeIsolated {
     // 授权延长：申请延长、最近结束、已授权设备的「延长」
     let rvm = makeDemoVM()
     rvm.tunnels[0].renewals = decode([RenewalItem].self, """
-    [{"tunnel_id":"\(rvm.tunnels[0].id)","ip":"192.168.1.35","name":"李四","invite":"ab1","ended_at":"\(t(-1200))","renew_before":"\(t(6000))",
-      "request":{"id":"rn1","tunnel_id":"\(rvm.tunnels[0].id)","name":"李四","ip":"192.168.1.35","invite":"ab1","at":"\(t(-60))","status":"pending","renewal":true}},
+    [{"tunnel_id":"\(rvm.tunnels[0].id)","ip":"192.168.1.47","name":"赵六","invite":"ab1","ended_at":"\(t(-1200))","renew_before":"\(t(6000))",
+      "request":{"id":"rn1","tunnel_id":"\(rvm.tunnels[0].id)","name":"赵六","ip":"192.168.1.47","invite":"ab1","at":"\(t(-60))","status":"pending","renewal":true}},
      {"tunnel_id":"\(rvm.tunnels[0].id)","ip":"192.168.1.36","name":"王五","invite":"ab2","ended_at":"\(t(-3000))","renew_before":"\(t(4200))"}]
     """)
-    render("renew-access", CGSize(width: 760, height: 620), ClientDetailsSheet(vm: rvm, tunnel: rvm.tunnels[0], initialTab: 2, isPresented: yes))
+    render("readme-access", CGSize(width: 760, height: 800), ClientDetailsSheet(vm: rvm, tunnel: rvm.tunnels[0], initialTab: 2, isPresented: yes))
     render("renew-card", CGSize(width: 980, height: 220), TunnelCardView(tunnel: rvm.tunnels[0], vm: rvm, onEdit: {}, onViewClients: {}, onViewLeases: {}, onInvite: {}).padding(20))
     render("renew-invite-form", CGSize(width: 600, height: 400), InviteSheet(vm: rvm, tunnel: rvm.tunnels[0], autoGenerate: false, isPresented: yes))
     render("renew-custom", CGSize(width: 300, height: 90), CustomMinutesForm(actionTitle: "延长") { _ in })
