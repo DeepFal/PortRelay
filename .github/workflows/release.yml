@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   binaries:
-    name: Server & agent binaries
+    name: Server & agent archives
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,24 +31,22 @@ jobs:
             dist/*.zip
 
   macos-app:
-    name: macOS app
+    name: macOS app (dmg)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Build universal app
+      - name: Build universal dmg
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           case "$VERSION" in [0-9]*) ;; *) VERSION=0.0.0-${GITHUB_SHA::7} ;; esac
-          UNIVERSAL=1 VERSION=$VERSION ./build-app.sh
-          mkdir -p dist
-          ditto -c -k --sequesterRsrc --keepParent PortRelay.app "dist/PortRelay-$VERSION-macos-universal.zip"
+          UNIVERSAL=1 make dmg VERSION=$VERSION
       - uses: actions/upload-artifact@v4
         with:
           name: macos-app
-          path: dist/*.zip
+          path: dist/*.dmg
 
   docker:
     name: Docker image
@@ -88,13 +86,27 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
+      # 说明 = 标签注释正文（本次更新）+ 下载说明（区分客户端与服务端）+ 自动生成的变更列表
+      - name: Release notes
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          body=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
+          {
+            if [ -n "$body" ]; then printf "## 本次更新 · What's new\n\n%s\n\n" "$body"; fi
+            sed -e "s|{{VERSION}}|${GITHUB_REF_NAME#v}|g" \
+                -e "s|{{DOWNLOAD}}|https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME|g" \
+                -e "s|{{IMAGE}}|ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portrelay-server|g" \
+                .github/release-notes.md
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes

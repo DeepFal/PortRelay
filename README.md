@@ -153,9 +153,9 @@ PortRelay 把这件事变成三步：
 **方式 A：二进制 + systemd（推荐）**
 
 ```bash
-VERSION=1.0.0   # 见 Releases 页面
-curl -LO https://github.com/DeepFal/PortRelay/releases/download/v$VERSION/portrelay-$VERSION-linux-amd64.tar.gz
-tar xzf portrelay-$VERSION-linux-amd64.tar.gz && cd portrelay-$VERSION-linux-amd64
+VERSION=1.1.0   # 见 Releases 页面；ARM64 机器把 amd64 换成 arm64
+curl -LO https://github.com/DeepFal/PortRelay/releases/download/v$VERSION/portrelay-server-$VERSION-linux-amd64.tar.gz
+tar xzf portrelay-server-$VERSION-linux-amd64.tar.gz && cd portrelay-server-$VERSION-linux-amd64
 sudo ./deploy/install-server.sh ./portrelay-server
 
 # 安装脚本会生成随机 token，记下来填到 Agent 里
@@ -185,7 +185,7 @@ make server        # 产物：dist/portrelay-server-linux-{amd64,arm64}
 
 ### 2. 运行 Agent
 
-**macOS App**：从 [Releases](https://github.com/DeepFal/PortRelay/releases) 下载 `PortRelay-*-macos-universal.zip`，解压后拖进“应用程序”。
+**macOS App**：从 [Releases](https://github.com/DeepFal/PortRelay/releases) 下载 `PortRelay-*.dmg`（Apple Silicon 与 Intel 通用），打开后把 PortRelay 拖进“应用程序”。
 
 > [!NOTE]
 > App 未经 Apple 公证。首次打开时，在 Finder 中右键选择“打开”，或者执行 `xattr -dr com.apple.quarantine /Applications/PortRelay.app`。也可以 `make app` 自行构建。
@@ -200,7 +200,7 @@ make server        # 产物：dist/portrelay-server-linux-{amd64,arm64}
 
 > 举例：Agent 通过 Tailscale 地址 `100.64.0.10` 连网关，同事在办公室局域网里用 `192.168.1.10` 访问。这时“服务器控制地址”填 `100.64.0.10:33000`，“对外访问地址”填 `192.168.1.10`，邀请链接和分享文案都会使用后者。
 
-**Linux / Windows**：下载对应平台的压缩包，直接运行 Agent，在浏览器打开的面板里完成同样的设置。
+**Linux / Windows**：下载对应平台的 `portrelay-agent-*` 压缩包，直接运行 Agent，在浏览器打开的面板里完成同样的设置。
 
 ```bash
 ./portrelay-agent              # 面板：http://127.0.0.1:33080

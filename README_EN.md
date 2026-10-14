@@ -158,9 +158,9 @@ The gateway must be reachable by **visitors** and by **the agent**. Open TCP `33
 **Option A: binary + systemd (recommended)**
 
 ```bash
-VERSION=1.0.0   # see the Releases page
-curl -LO https://github.com/DeepFal/PortRelay/releases/download/v$VERSION/portrelay-$VERSION-linux-amd64.tar.gz
-tar xzf portrelay-$VERSION-linux-amd64.tar.gz && cd portrelay-$VERSION-linux-amd64
+VERSION=1.1.0   # see the Releases page; use arm64 instead of amd64 on ARM hosts
+curl -LO https://github.com/DeepFal/PortRelay/releases/download/v$VERSION/portrelay-server-$VERSION-linux-amd64.tar.gz
+tar xzf portrelay-server-$VERSION-linux-amd64.tar.gz && cd portrelay-server-$VERSION-linux-amd64
 sudo ./deploy/install-server.sh ./portrelay-server
 
 # The installer generates a random token; you will enter it in the agent
@@ -194,7 +194,7 @@ make server        # dist/portrelay-server-linux-{amd64,arm64}
 
 ### 2. Run the agent
 
-**macOS app.** Download `PortRelay-*-macos-universal.zip` from [Releases](https://github.com/DeepFal/PortRelay/releases), unzip it and move it to Applications.
+**macOS app.** Download `PortRelay-*.dmg` (universal: Apple Silicon and Intel) from [Releases](https://github.com/DeepFal/PortRelay/releases), open it and drag PortRelay to Applications.
 
 > [!NOTE]
 > The app is not notarized. On first launch, right-click it in Finder and choose Open, or run `xattr -dr com.apple.quarantine /Applications/PortRelay.app`. You can also build it yourself with `make app`.
@@ -209,7 +209,7 @@ Open ⚙️ Settings and fill in:
 
 > Example: the agent reaches the gateway over Tailscale at `100.64.0.10`, while teammates in the office use the LAN address `192.168.1.10`. Set the control address to `100.64.0.10:33000` and the public access address to `192.168.1.10`. Invite links and share messages will use the LAN address.
 
-**Linux / Windows.** Download the archive for your platform, run the agent, and use the web panel that opens in your browser.
+**Linux / Windows.** Download the `portrelay-agent-*` archive for your platform, run the agent, and use the web panel that opens in your browser.
 
 ```bash
 ./portrelay-agent              # panel at http://127.0.0.1:33080
