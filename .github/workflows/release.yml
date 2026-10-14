@@ -87,10 +87,15 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
+      # 只取安装包；docker 任务还会上传构建记录，不能一并下载
       - uses: actions/download-artifact@v4
         with:
+          name: binaries
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-app
+          path: dist
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
       # 说明 = 标签注释正文（本次更新）+ 下载说明（区分客户端与服务端）+ 自动生成的变更列表
