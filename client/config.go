@@ -572,6 +572,25 @@ func (cm *ConfigManager) PatchTunnel(id string, patch []byte) (protocol.TunnelCo
 	return cloneTunnel(updated), existing.ListenPort, cm.save()
 }
 
+// ExtendUntil keeps an open tunnel open at least until t: an approved access extension outlasts the
+// tunnel's maximum open time. Returns the tunnel and whether it changed.
+func (cm *ConfigManager) ExtendUntil(id string, t time.Time) (protocol.TunnelConfig, bool, error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	for i, tc := range cm.cfg.Tunnels {
+		if tc.ID != id {
+			continue
+		}
+		if !tc.Enabled || tc.ExpiresAt == nil || !tc.ExpiresAt.Before(t) {
+			return cloneTunnel(tc), false, nil
+		}
+		v := t
+		cm.cfg.Tunnels[i].ExpiresAt = &v
+		return cloneTunnel(cm.cfg.Tunnels[i]), true, cm.save()
+	}
+	return protocol.TunnelConfig{}, false, fmt.Errorf("通道 %s 未找到", id)
+}
+
 // RefreshAuthCode generates a new auth code for a tunnel
 func (cm *ConfigManager) RefreshAuthCode(id string) (protocol.TunnelConfig, error) {
 	cm.mu.Lock()

@@ -34,6 +34,7 @@ type Agent struct {
 	latestMetrics protocol.MetricsMessage
 	regErrors     map[string]string // tunnelID -> 服务器返回的注册失败原因
 	inviteWaiters map[string]chan protocol.InviteRespMessage
+	extendWaiters map[string]chan protocol.ExtendLeaseRespMessage
 
 	controlWriteMu sync.Mutex
 	controlWriter  *bufio.Writer
@@ -57,6 +58,7 @@ func NewAgent(cm *ConfigManager) *Agent {
 		cm:              cm,
 		regErrors:       make(map[string]string),
 		inviteWaiters:   make(map[string]chan protocol.InviteRespMessage),
+		extendWaiters:   make(map[string]chan protocol.ExtendLeaseRespMessage),
 		usage:           make(map[string]*usageState),
 		idleUnit:        time.Minute,
 		rates:           newRateRecorder(),
@@ -199,6 +201,18 @@ func (a *Agent) trackUsage(now time.Time) {
 			groupBusy[gm.GroupID] = true
 		}
 	}
+	// 等待批准的延长申请：通道（组）保持开启，避免关了又被批准重开
+	renewing := make(map[string]bool)
+	for _, r := range metrics.Renewals {
+		if r.Request == nil {
+			continue
+		}
+		if r.GroupID != "" {
+			groupBusy[r.GroupID] = true
+		} else {
+			renewing[r.TunnelID] = true
+		}
+	}
 	for _, t := range cfg.Tunnels {
 		if m, ok := byID[t.ID]; ok && t.Enabled && t.GroupID != "" && m.Status == "online" && tunnelInUse(m) {
 			groupBusy[t.GroupID] = true
@@ -242,7 +256,7 @@ func (a *Agent) trackUsage(now time.Time) {
 				firstConn = append(firstConn, t.ID)
 			}
 		}
-		u.inUse = tunnelInUse(m) || (t.GroupID != "" && groupBusy[t.GroupID])
+		u.inUse = tunnelInUse(m) || renewing[t.ID] || (t.GroupID != "" && groupBusy[t.GroupID])
 		if u.inUse {
 			u.lastActive = now
 		}
@@ -520,6 +534,17 @@ func (a *Agent) connectAndRun(cfg Config) error {
 				delete(a.inviteWaiters, resp.RequestID)
 			}
 			a.mu.Unlock()
+		case protocol.TypeExtendResp:
+			var resp protocol.ExtendLeaseRespMessage
+			if json.Unmarshal(line, &resp) != nil {
+				continue
+			}
+			a.mu.Lock()
+			if ch, ok := a.extendWaiters[resp.RequestID]; ok {
+				ch <- resp
+				delete(a.extendWaiters, resp.RequestID)
+			}
+			a.mu.Unlock()
 		case protocol.TypeRegisterResp:
 			var resp protocol.RegisterRespMessage
 			if json.Unmarshal(line, &resp) != nil {
@@ -743,14 +768,24 @@ func (a *Agent) wire(t protocol.TunnelConfig) protocol.TunnelConfig {
 	return t
 }
 
+// RemoveTunnel closes a tunnel on the relay server; its devices can still ask for an extension
 func (a *Agent) RemoveTunnel(id string) {
+	a.unregister(id, false)
+}
+
+// DeleteTunnel removes a deleted tunnel from the relay server, renewal records included
+func (a *Agent) DeleteTunnel(id string) {
+	a.unregister(id, true)
+}
+
+func (a *Agent) unregister(id string, deleted bool) {
 	a.mu.Lock()
 	delete(a.regErrors, id)
 	a.mu.Unlock()
 	if !a.IsConnected() {
 		return
 	}
-	_ = a.sendControl(protocol.UnregisterMessage{Type: protocol.TypeUnregister, TunnelID: id})
+	_ = a.sendControl(protocol.UnregisterMessage{Type: protocol.TypeUnregister, TunnelID: id, Deleted: deleted})
 }
 
 // Scope selects what an invite, request or lease applies to: one tunnel, or a whole group
@@ -789,6 +824,38 @@ func (a *Agent) CreateInvite(scope Scope, note string, validMinutes, maxUses int
 		return resp.Invite, nil
 	case <-time.After(5 * time.Second):
 		return protocol.Invite{}, fmt.Errorf("服务器未响应，请检查是否已升级到支持邀请链接的版本")
+	}
+}
+
+// ExtendLease extends a device's access by minutes (approving its renewal requests) and returns
+// the new expiry
+func (a *Agent) ExtendLease(scope Scope, ip string, minutes int) (time.Time, error) {
+	if !a.IsConnected() {
+		return time.Time{}, fmt.Errorf("未连接中继服务器")
+	}
+	reqID := uuid.New().String()
+	ch := make(chan protocol.ExtendLeaseRespMessage, 1)
+	a.mu.Lock()
+	a.extendWaiters[reqID] = ch
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		delete(a.extendWaiters, reqID)
+		a.mu.Unlock()
+	}()
+	if err := a.sendControl(protocol.ExtendLeaseMessage{
+		Type: protocol.TypeExtendLease, RequestID: reqID, TunnelID: scope.TunnelID, GroupID: scope.GroupID, IP: ip, Minutes: minutes,
+	}); err != nil {
+		return time.Time{}, err
+	}
+	select {
+	case resp := <-ch:
+		if !resp.Success {
+			return time.Time{}, fmt.Errorf("%s", resp.Error)
+		}
+		return resp.ExpiresAt, nil
+	case <-time.After(5 * time.Second):
+		return time.Time{}, fmt.Errorf("服务器未响应，请先把服务端更新到支持延长授权的版本")
 	}
 }
 
@@ -859,5 +926,6 @@ func (a *Agent) GetLatestMetrics() protocol.MetricsMessage {
 	m.Groups = append([]protocol.GroupMetrics(nil), m.Groups...)
 	m.ActiveConns = append([]protocol.ActiveConnInfo(nil), m.ActiveConns...)
 	m.SecurityEvents = append([]protocol.SecurityEvent(nil), m.SecurityEvents...)
+	m.Renewals = append([]protocol.RenewalInfo(nil), m.Renewals...)
 	return m
 }

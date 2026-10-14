@@ -1,6 +1,11 @@
 package protocol
 
-import "time"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // Message types
 const (
@@ -18,6 +23,8 @@ const (
 	TypeRevokeInvite   = "revoke_invite"
 	TypeDecideRequest  = "decide_request"
 	TypeDeleteGroup    = "delete_group"
+	TypeExtendLease    = "extend_lease"
+	TypeExtendResp     = "extend_lease_resp"
 	TypeMetrics        = "metrics_update"
 	TypePing           = "ping"
 	TypePong           = "pong"
@@ -94,6 +101,8 @@ type RegisterRespMessage struct {
 type UnregisterMessage struct {
 	Type     string `json:"type"`
 	TunnelID string `json:"tunnel_id"`
+	// Deleted 为 true 表示通道被删除：连同可延长的授权记录一起清除；否则只是关闭
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 // UnregisterRespMessage response to unregister
@@ -130,7 +139,8 @@ type DeleteGroupMessage struct {
 	GroupID string `json:"group_id"`
 }
 
-// Lease durations (Invite.LeaseDuration)：通过邀请获得授权后可访问多久
+// Lease durations (Invite.LeaseDuration)：通过邀请获得授权后可访问多久。
+// 除下列取值外，也可以是分钟数，如 "30m"、"90m"（见 LeaseMinutes）。
 const (
 	LeaseDuration1h     = "1h"
 	LeaseDuration2h     = "2h"
@@ -139,32 +149,75 @@ const (
 	LeaseDurationTunnel = "tunnel" // 通道开启期间有效
 )
 
+// 自定义授权时长的范围（分钟）
+const (
+	MinLeaseMinutes = 5
+	MaxLeaseMinutes = 30 * 24 * 60
+)
+
+// LeaseMinutes returns how many minutes a fixed-length lease duration lasts ("" means 2 hours);
+// false for "today", "tunnel" and invalid values
+func LeaseMinutes(d string) (int, bool) {
+	switch d {
+	case "", LeaseDuration2h:
+		return 120, true
+	case LeaseDuration1h:
+		return 60, true
+	case LeaseDuration8h:
+		return 480, true
+	}
+	if !strings.HasSuffix(d, "m") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(d, "m"))
+	if err != nil || n < MinLeaseMinutes || n > MaxLeaseMinutes {
+		return 0, false
+	}
+	return n, true
+}
+
+// LeaseDurationOf is the lease duration value for a number of minutes
+func LeaseDurationOf(minutes int) string {
+	return fmt.Sprintf("%dm", minutes)
+}
+
 // ValidLeaseDuration reports whether d is a supported lease duration ("" means default 2h)
 func ValidLeaseDuration(d string) bool {
-	switch d {
-	case "", LeaseDuration1h, LeaseDuration2h, LeaseDuration8h, LeaseDurationToday, LeaseDurationTunnel:
+	if d == LeaseDurationToday || d == LeaseDurationTunnel {
 		return true
 	}
-	return false
+	_, ok := LeaseMinutes(d)
+	return ok
+}
+
+// DescribeMinutes renders a duration in minutes: "30 分钟"、"2 小时"、"1 小时 30 分钟"、"3 天"
+func DescribeMinutes(n int) string {
+	switch {
+	case n >= 1440 && n%1440 == 0:
+		return fmt.Sprintf("%d 天", n/1440)
+	case n >= 60 && n%60 == 0:
+		return fmt.Sprintf("%d 小时", n/60)
+	case n > 60:
+		return fmt.Sprintf("%d 小时 %d 分钟", n/60, n%60)
+	default:
+		return fmt.Sprintf("%d 分钟", n)
+	}
 }
 
 // DescribeLeaseDuration is the human-readable lease duration
 func DescribeLeaseDuration(d string) string {
 	switch d {
-	case LeaseDuration1h:
-		return "1 小时"
-	case LeaseDuration8h:
-		return "8 小时"
 	case LeaseDurationToday:
 		return "当天有效"
 	case LeaseDurationTunnel:
 		return "通道开启期间有效"
-	default:
-		return "2 小时"
 	}
+	if n, ok := LeaseMinutes(d); ok {
+		return DescribeMinutes(n)
+	}
+	return "2 小时"
 }
 
-// DynamicLease is a temporary whitelist entry granted through an invite link
 type DynamicLease struct {
 	IP        string    `json:"ip"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -208,6 +261,45 @@ type AccessRequest struct {
 	Invite   string    `json:"invite,omitempty"`
 	At       time.Time `json:"at"`
 	Status   string    `json:"status"` // pending / approved / rejected
+	// Renewal 为 true 表示授权已结束（或即将结束）的设备申请延长；由管理员批准时决定延长多久
+	Renewal bool `json:"renewal,omitempty"`
+}
+
+// RenewalInfo is a device whose access can still be extended: it ended less than two hours ago
+// (even if its tunnel has been closed since), or it asked to extend an access that is still running.
+type RenewalInfo struct {
+	TunnelID string `json:"tunnel_id,omitempty"`
+	GroupID  string `json:"group_id,omitempty"`
+	IP       string `json:"ip"`
+	Name     string `json:"name,omitempty"`
+	Invite   string `json:"invite,omitempty"`
+	// EndedAt 访问结束的时间（授权到期或通道关闭）；授权仍有效时为空
+	EndedAt *time.Time `json:"ended_at,omitempty"`
+	// RenewBefore 可以延长的截止时间（结束后 2 小时）
+	RenewBefore *time.Time `json:"renew_before,omitempty"`
+	// Request 该设备待处理的延长申请
+	Request *AccessRequest `json:"request,omitempty"`
+}
+
+// ExtendLeaseMessage extends a device's access by Minutes: a running lease from its expiry, an
+// ended one (within two hours) from now. It approves the pending renewal requests of that device,
+// and is not capped by the tunnel's own maximum open time.
+type ExtendLeaseMessage struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"` // 用于匹配 ExtendLeaseRespMessage
+	TunnelID  string `json:"tunnel_id"`
+	GroupID   string `json:"group_id,omitempty"`
+	IP        string `json:"ip"`
+	Minutes   int    `json:"minutes"`
+}
+
+// ExtendLeaseRespMessage answers ExtendLeaseMessage with the new expiry
+type ExtendLeaseRespMessage struct {
+	Type      string    `json:"type"`
+	RequestID string    `json:"request_id"`
+	Success   bool      `json:"success"`
+	Error     string    `json:"error,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // CreateInviteMessage asks the server to create an invite link
@@ -321,6 +413,8 @@ type MetricsMessage struct {
 	Groups         []GroupMetrics   `json:"groups,omitempty"`
 	ActiveConns    []ActiveConnInfo `json:"active_conns"`
 	SecurityEvents []SecurityEvent  `json:"security_events,omitempty"`
+	// Renewals 可延长的设备与延长申请，包括已关闭的通道
+	Renewals []RenewalInfo `json:"renewals,omitempty"`
 }
 
 // StreamHandshake sent as first line when a data stream is opened

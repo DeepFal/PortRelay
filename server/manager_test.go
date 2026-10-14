@@ -575,8 +575,9 @@ func TestRevokeInviteRemovesItsLeases(t *testing.T) {
 	if hit(cfg.ListenPort) == "OK" {
 		t.Fatal("leases of revoked invite still active")
 	}
-	if status, _ := httpGet(t, addr, "/i/"+inv.Code, nil); status != 404 {
-		t.Fatal("revoked invite still usable")
+	// 用过它的设备看到「授权已撤销」，不能申请延长
+	if status, body := httpGet(t, addr, "/i/"+inv.Code, nil); status != 403 || !strings.Contains(body, "授权已撤销") {
+		t.Fatalf("revoked invite still usable: %d", status)
 	}
 }
 

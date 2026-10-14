@@ -34,6 +34,8 @@ struct TunnelItem: Identifiable, Codable {
     var rate_history: RateSeriesItem?
     /// 所属通道组
     var group_id: String?
+    /// 可延长的设备与延长申请（通道关闭后 2 小时内仍有）
+    var renewals: [RenewalItem]?
 }
 
 /// 近 10 分钟流量曲线：固定 120 个点（5 秒一个），最后一点为当前
@@ -113,6 +115,24 @@ struct AccessRequestItem: Identifiable, Codable {
     var invite: String?
     var at: String
     var status: String
+    /// 授权已结束（或即将结束）的设备申请延长，批准时由管理员决定时长
+    var renewal: Bool?
+}
+
+/// 可延长的设备：访问结束 2 小时内（通道关闭后也保留），或提交了延长申请
+struct RenewalItem: Identifiable, Codable {
+    var id: String { ip }
+    var tunnel_id: String?
+    var group_id: String?
+    var ip: String
+    var name: String?
+    var invite: String?
+    /// 访问结束时间；授权仍有效时为空
+    var ended_at: String?
+    /// 可以延长的截止时间
+    var renew_before: String?
+    /// 待处理的延长申请
+    var request: AccessRequestItem?
 }
 
 /// 通道组：组内通道共用邀请、授权与审批，闲置计时联动
@@ -125,6 +145,7 @@ struct GroupItem: Identifiable, Codable {
     var tunnel_ids: [String]
     var metrics: GroupMetricsItem?
     var rate_history: RateSeriesItem?
+    var renewals: [RenewalItem]?
 }
 
 struct GroupMetricsItem: Codable {
@@ -400,11 +421,34 @@ func makeQRCode(_ text: String, size: CGFloat = 180) -> NSImage? {
 }
 
 let leaseDurationOptions: [(value: String, title: String)] = [
-    ("1h", "1 小时"), ("2h", "2 小时"), ("8h", "8 小时"), ("today", "当天有效"), ("tunnel", "通道开启期间")
+    ("30m", "30 分钟"), ("1h", "1 小时"), ("2h", "2 小时"), ("8h", "8 小时"), ("today", "当天有效"), ("tunnel", "通道开启期间")
 ]
 
+/// 延长授权的常用时长（分钟）
+let extendOptions: [(Int, String)] = [(30, "30 分钟"), (60, "1 小时"), (120, "2 小时"), (480, "8 小时")]
+
+/// 自定义时长的上限：30 天
+let maxCustomMinutes = 30 * 24 * 60
+
+/// "30 分钟"、"2 小时"、"1 小时 30 分钟"、"3 天"
+func describeMinutes(_ n: Int) -> String {
+    if n >= 1440 && n % 1440 == 0 { return "\(n / 1440) 天" }
+    if n >= 60 && n % 60 == 0 { return "\(n / 60) 小时" }
+    if n > 60 { return "\(n / 60) 小时 \(n % 60) 分钟" }
+    return "\(n) 分钟"
+}
+
+/// 自定义授权时长（"90m"）对应的分钟数
+func customLeaseMinutes(_ v: String) -> Int? {
+    guard v.hasSuffix("m"), let n = Int(v.dropLast()) else { return nil }
+    return n
+}
+
 func leaseDurationTitle(_ v: String?) -> String {
-    leaseDurationOptions.first { $0.value == (v ?? "2h") }?.title ?? "2 小时"
+    let value = v ?? "2h"
+    if let opt = leaseDurationOptions.first(where: { $0.value == value }) { return opt.title }
+    if let n = customLeaseMinutes(value) { return describeMinutes(n) }
+    return "2 小时"
 }
 
 func copyToPasteboard(_ text: String) {
@@ -661,6 +705,136 @@ struct StringChip: View {
     }
 }
 
+/// 自定义时长输入：数字 + 分钟 / 小时
+struct CustomMinutesForm: View {
+    let actionTitle: String
+    let onDone: (Int) -> Void
+    @State private var amount: String
+    @State private var hours: Bool
+
+    init(actionTitle: String, initialMinutes: Int? = nil, onDone: @escaping (Int) -> Void) {
+        self.actionTitle = actionTitle
+        self.onDone = onDone
+        let m = initialMinutes ?? 90
+        let whole = m >= 60 && m % 60 == 0
+        _hours = State(initialValue: whole)
+        _amount = State(initialValue: whole ? "\(m / 60)" : "\(m)")
+    }
+
+    var minutes: Int? {
+        guard let n = Int(amount.trimmingCharacters(in: .whitespaces)), n > 0 else { return nil }
+        let m = hours ? n * 60 : n
+        return m <= maxCustomMinutes ? m : nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("数量", text: $amount)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 64)
+                    .onSubmit { if let m = minutes { onDone(m) } }
+                Picker("", selection: $hours) {
+                    Text("分钟").tag(false)
+                    Text("小时").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                Button(actionTitle) { if let m = minutes { onDone(m) } }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(minutes == nil)
+            }
+            Text(verbatim: minutes.map { "共 \(describeMinutes($0))" } ?? "请输入 1 分钟到 30 天之间的时长")
+                .font(.system(size: 11))
+                .foregroundColor(minutes == nil ? .red : .secondary)
+        }
+        .padding(12)
+    }
+}
+
+/// 「自定义…」时长选项：选中时显示具体时长，点击弹出输入框
+struct CustomDurationChip: View {
+    let isCustom: Bool
+    let currentMinutes: Int?
+    let apply: (Int) -> Void
+    @State private var editing = false
+
+    var body: some View {
+        Button(action: { editing = true }) {
+            ChipLabel(title: isCustom ? "自定义 · \(describeMinutes(currentMinutes ?? 0))" : "自定义…", selected: isCustom)
+        }
+        .buttonStyle(.borderless)
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            CustomMinutesForm(actionTitle: "确定", initialMinutes: isCustom ? currentMinutes : nil) { m in
+                apply(m)
+                editing = false
+            }
+        }
+    }
+}
+
+/// 「延长 ▾」：选一个时长立即生效，并批准该设备的延长申请；通道已关闭时会自动重新开启
+struct ExtendMenu: View {
+    @ObservedObject var vm: PortRelayViewModel
+    let scope: AccessScope
+    let ip: String
+    var title: String = "延长"
+    var prominent: Bool = false
+    @State private var showingCustom = false
+    @State private var working = false
+    @State private var error: String? = nil
+
+    var body: some View {
+        Menu {
+            ForEach(extendOptions, id: \.0) { opt in
+                Button("延长 \(opt.1)") { extend(opt.0) }
+            }
+            Divider()
+            Button("自定义时长…") { showingCustom = true }
+        } label: {
+            Text(working ? "处理中…" : title)
+        }
+        .menuStyle(.button)
+        .modifier(ExtendMenuStyle(prominent: prominent))
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(working)
+        .help(vm.scopeEnabled(scope) ? "选择延长多久，立即生效" : "选择延长多久；通道已关闭，会自动重新开启")
+        .popover(isPresented: $showingCustom, arrowEdge: .bottom) {
+            CustomMinutesForm(actionTitle: "延长") { m in
+                showingCustom = false
+                extend(m)
+            }
+        }
+        .alert("延长失败", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("好") {}
+        } message: {
+            Text(verbatim: error ?? "")
+        }
+    }
+
+    func extend(_ minutes: Int) {
+        working = true
+        Task {
+            error = await vm.extendLease(scope: scope, ip: ip, minutes: minutes)
+            working = false
+        }
+    }
+}
+
+struct ExtendMenuStyle: ViewModifier {
+    let prominent: Bool
+    func body(content: Content) -> some View {
+        if prominent {
+            content.buttonStyle(.borderedProminent)
+        } else {
+            content.buttonStyle(.bordered)
+        }
+    }
+}
+
 // MARK: - Tunnel Search
 
 /// 通道搜索：多个关键字（空格分隔）需全部命中；不区分大小写；中文支持全拼与拼音首字母
@@ -779,6 +953,14 @@ func formatDateTimeShort(_ str: String?) -> String {
     return df.string(from: d)
 }
 
+/// 时刻（不带秒）：今天为 "15:20"，其他日期为 "10-13 15:20"
+func formatClock(_ str: String?) -> String {
+    guard let d = parseISO8601(str) else { return "-" }
+    let df = DateFormatter()
+    df.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "MM-dd HH:mm"
+    return df.string(from: d)
+}
+
 /// 同一 IP 的历史连接合并展示
 struct HistoryIPGroup: Identifiable {
     let ip: String
@@ -830,6 +1012,21 @@ class PortRelayViewModel: ObservableObject {
         return out
     }
 
+    /// 所有待处理的延长申请（单个通道的与通道组的，含已关闭的通道）
+    var renewalRequests: [(title: String, scope: AccessScope, renewal: RenewalItem)] {
+        var out: [(title: String, scope: AccessScope, renewal: RenewalItem)] = []
+        for t in tunnels {
+            for r in t.renewals ?? [] where r.request != nil { out.append((title: t.name, scope: .tunnel(t.id), renewal: r)) }
+        }
+        for g in groups {
+            for r in g.renewals ?? [] where r.request != nil { out.append((title: g.name, scope: .group(g.id), renewal: r)) }
+        }
+        return out
+    }
+
+    /// 菜单栏上提醒的待处理数：首次访问申请 + 延长申请
+    var attentionCount: Int { pendingRequests.count + renewalRequests.count }
+
     // MARK: 通道组与授权范围
 
     func members(of g: GroupItem) -> [TunnelItem] {
@@ -871,6 +1068,13 @@ class PortRelayViewModel: ObservableObject {
         switch s {
         case .tunnel(let id): return tunnels.first { $0.id == id }?.metrics?.invites ?? []
         case .group(let id): return group(id)?.metrics?.invites ?? []
+        }
+    }
+
+    func scopeRenewals(_ s: AccessScope) -> [RenewalItem] {
+        switch s {
+        case .tunnel(let id): return tunnels.first { $0.id == id }?.renewals ?? []
+        case .group(let id): return group(id)?.renewals ?? []
         }
     }
 
@@ -1046,6 +1250,15 @@ class PortRelayViewModel: ObservableObject {
             content.sound = .default
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: r.id, content: content, trigger: nil))
         }
+        for (title, _, rn) in renewalRequests {
+            guard let r = rn.request, !notifiedRequests.contains(r.id) else { continue }
+            notifiedRequests.insert(r.id)
+            let content = UNMutableNotificationContent()
+            content.title = "延长申请：\(title)"
+            content.body = "\(r.name)（\(r.ip)）申请延长访问，在菜单栏或授权管理里选择延长多久即可批准"
+            content.sound = .default
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: r.id, content: content, trigger: nil))
+        }
     }
 
     /// 菜单内容有变化时才需要重建（避免每秒重建打断已展开的菜单）
@@ -1053,7 +1266,8 @@ class PortRelayViewModel: ObservableObject {
         // 分步拼接：一长串字符串相加会让旧版编译器类型推断超时
         let tunnelSig: String = tunnels.map { "\($0.id):\($0.name):\($0.listen_port):\($0.enabled):\($0.group_id ?? "")" }.joined(separator: ",")
         let groupSig: String = groups.map { "\($0.id):\($0.name)" }.joined(separator: ",")
-        let pendingSig: String = pendingRequests.map { $0.request.id }.joined(separator: ",")
+        let requestIDs: [String] = pendingRequests.map { $0.request.id } + renewalRequests.compactMap { $0.renewal.request?.id }
+        let pendingSig: String = requestIDs.joined(separator: ",")
         let sig = [String(isConnected), tunnelSig, groupSig, pendingSig].joined(separator: "|")
         if sig == lastMenuSignature { return false }
         lastMenuSignature = sig
@@ -1371,6 +1585,18 @@ class PortRelayViewModel: ObservableObject {
     func decideRequest(scope: AccessScope, requestId: String, approve: Bool) async -> String? {
         let (_, err) = await apiCall("POST", "\(scope.apiPath)/requests/\(requestId)", body: ["approve": approve])
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [requestId])
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        await refreshData()
+        return err
+    }
+
+    /// 延长某台设备的访问（同时批准它的延长申请）；通道已关闭时会自动重新开启。返回错误信息，成功为 nil
+    func extendLease(scope: AccessScope, ip: String, minutes: Int) async -> String? {
+        let requestID = scopeRenewals(scope).first { $0.ip == ip }?.request?.id
+        let (_, err) = await apiCall("POST", "\(scope.apiPath)/leases/extend", body: ["ip": ip, "minutes": minutes])
+        if err == nil, let rid = requestID {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [rid])
+        }
         try? await Task.sleep(nanoseconds: 1_200_000_000)
         await refreshData()
         return err
@@ -2267,6 +2493,13 @@ struct TunnelCardView: View {
             .buttonStyle(.plain)
             .help("有同事申请访问，点击审批")
         }
+        if let asks = tunnel.renewals?.filter({ $0.request != nil }), !asks.isEmpty {
+            Button(action: onViewLeases) {
+                capsule("clock.arrow.circlepath", "申请延长 \(asks.count)", .orange)
+            }
+            .buttonStyle(.plain)
+            .help("有同事申请延长访问，点击选择延长多久")
+        }
         if let leases = tunnel.metrics?.dynamic_leases, !leases.isEmpty {
             Button(action: onViewLeases) {
                 HStack(spacing: 2) {
@@ -2342,6 +2575,7 @@ struct GroupCardView: View {
     var rateOut: Int64 { enabledMembers.reduce(0) { $0 + ($1.metrics?.rate_out ?? 0) } }
     var groupLeases: [DynamicLeaseItem] { group.metrics?.dynamic_leases ?? [] }
     var groupPending: [AccessRequestItem] { group.metrics?.pending ?? [] }
+    var groupRenewalAsks: [RenewalItem] { (group.renewals ?? []).filter { $0.request != nil } }
 
     var statusBadge: (text: String, color: Color) {
         if members.isEmpty { return ("暂无通道", .secondary) }
@@ -2617,6 +2851,13 @@ struct GroupCardView: View {
             .buttonStyle(.plain)
             .help("有同事申请访问整组，点击审批")
         }
+        if !groupRenewalAsks.isEmpty {
+            Button(action: { onViewClients(2) }) {
+                cardCapsule("clock.arrow.circlepath", "申请延长 \(groupRenewalAsks.count)", .orange)
+            }
+            .buttonStyle(.plain)
+            .help("有同事申请延长整组的访问，点击选择延长多久")
+        }
         if !groupLeases.isEmpty {
             Button(action: { onViewClients(2) }) {
                 cardCapsule("person.crop.circle.badge.checkmark", "已授权 \(groupLeases.count) 台", .green)
@@ -2825,6 +3066,11 @@ struct ClientDetailsSheet: View {
     var leases: [DynamicLeaseItem] { vm.scopeLeases(scope) }
     var invites: [InviteItem] { vm.scopeInvites(scope) }
     var pendingRequests: [AccessRequestItem] { vm.scopePending(scope) }
+    var renewals: [RenewalItem] { vm.scopeRenewals(scope) }
+    /// 申请延长的设备
+    var renewalAsks: [RenewalItem] { renewals.filter { $0.request != nil } }
+    /// 访问已结束、2 小时内还能延长的设备
+    var recentlyEnded: [RenewalItem] { renewals.filter { $0.request == nil && $0.ended_at != nil } }
 
     var subtitle: String {
         if scope.isGroup {
@@ -2929,7 +3175,7 @@ struct ClientDetailsSheet: View {
             Picker("", selection: $selectedTab) {
                 Text(verbatim: clientGroups.isEmpty ? "当前在线客户端" : "当前在线 (\(clientGroups.count) 台 · \(activeClientsForTunnel.count) 连接)").tag(0)
                 Text(verbatim: historyGroups.isEmpty ? "历史接入台账" : "历史接入台账 (\(historyGroups.count) 台)").tag(1)
-                Text(verbatim: "授权管理 (\(leases.count + pendingRequests.count))").tag(2)
+                Text(verbatim: "授权管理 (\(leases.count + pendingRequests.count + renewalAsks.count))").tag(2)
             }
             .pickerStyle(.segmented)
             .padding(.vertical, 4)
@@ -3434,6 +3680,13 @@ struct ClientDetailsSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
+                    if !renewalAsks.isEmpty {
+                        sectionHeader("申请延长", renewalAsks.count)
+                        ForEach(renewalAsks) { rn in
+                            renewalRow(rn)
+                        }
+                    }
+
                     if !pendingRequests.isEmpty {
                         sectionHeader("待审批", pendingRequests.count)
                         ForEach(pendingRequests) { r in
@@ -3510,6 +3763,9 @@ struct ClientDetailsSheet: View {
                             }
                             .layoutPriority(1)
                             Spacer(minLength: 8)
+                            if lease.awaiting_connect != true {
+                                ExtendMenu(vm: vm, scope: scope, ip: lease.ip)
+                            }
                             Button("撤销", role: .destructive) { revoke(ip: lease.ip) }
                                 .controlSize(.small)
                                 .disabled(isRevoking)
@@ -3518,6 +3774,13 @@ struct ClientDetailsSheet: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .rowCard()
+                    }
+
+                    if !recentlyEnded.isEmpty {
+                        sectionHeader("最近结束 · 2 小时内可延长", recentlyEnded.count)
+                        ForEach(recentlyEnded) { rn in
+                            renewalRow(rn)
+                        }
                     }
 
                     sectionHeader("有效的邀请链接", invites.count)
@@ -3581,6 +3844,59 @@ struct ClientDetailsSheet: View {
         .sheet(isPresented: $showingInviteSheet) {
             InviteSheet(vm: vm, scope: scope, autoGenerate: false, isPresented: $showingInviteSheet)
         }
+    }
+
+    /// 申请延长 / 最近结束的设备：选时长即延长（同时批准申请）
+    func renewalRow(_ rn: RenewalItem) -> some View {
+        let asking = rn.request != nil
+        return HStack(spacing: 10) {
+            Image(systemName: asking ? "clock.arrow.circlepath" : "clock")
+                .foregroundColor(asking ? .orange : .secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(verbatim: rn.name?.isEmpty == false ? rn.name! : "未署名")
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text(verbatim: rn.ip)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                    if !vm.scopeEnabled(scope) {
+                        TagView("通道已关闭，批准后自动开启")
+                    }
+                }
+                Text(verbatim: renewalDetail(rn))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            .layoutPriority(1)
+            Spacer(minLength: 8)
+            if let r = rn.request {
+                Button("拒绝") { decide(r, approve: false) }
+                    .controlSize(.small)
+                    .disabled(isRevoking)
+            }
+            ExtendMenu(vm: vm, scope: scope, ip: rn.ip, title: asking ? "批准延长" : "延长", prominent: asking)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .rowCard(tint: asking ? .orange : nil)
+    }
+
+    func renewalDetail(_ rn: RenewalItem) -> String {
+        var parts: [String] = []
+        if let r = rn.request {
+            parts.append("申请于 \(formatClock(r.at))")
+        }
+        if let end = rn.ended_at {
+            parts.append("访问已于 \(formatClock(end)) 结束")
+            if let before = rn.renew_before {
+                parts.append("\(formatClock(before)) 前可延长")
+            }
+        } else if let lease = leases.first(where: { $0.ip == rn.ip }) {
+            parts.append("当前有效至 \(formatClock(lease.expires_at))，批准后在此基础上顺延")
+        }
+        return parts.joined(separator: " · ")
     }
 
     func decide(_ r: AccessRequestItem, approve: Bool) {
@@ -4220,14 +4536,13 @@ struct TunnelEditSheet: View {
                 .padding(.top, 2)
             HStack(spacing: 6) {
                 DurationChip(title: "不限制", minutes: 0, selectedMinutes: $durationMinutes)
+                DurationChip(title: "30 分钟", minutes: 30, selectedMinutes: $durationMinutes)
                 DurationChip(title: "2 小时", minutes: 120, selectedMinutes: $durationMinutes)
                 DurationChip(title: "8 小时", minutes: 480, selectedMinutes: $durationMinutes)
                 DurationChip(title: "1 天", minutes: 1440, selectedMinutes: $durationMinutes)
                 DurationChip(title: "7 天", minutes: 10080, selectedMinutes: $durationMinutes)
-                // 兼容旧配置中的其他时长
-                if ![0, 120, 480, 1440, 10080].contains(durationMinutes) {
-                    DurationChip(title: formatSecondsToDuration(Int64(durationMinutes) * 60), minutes: durationMinutes, selectedMinutes: $durationMinutes)
-                }
+                CustomDurationChip(isCustom: ![0, 30, 120, 480, 1440, 10080].contains(durationMinutes),
+                                   currentMinutes: durationMinutes) { durationMinutes = $0 }
             }
         }
     }
@@ -4661,6 +4976,8 @@ struct InviteSheet: View {
                         ForEach(leaseDurationOptions, id: \.value) { opt in
                             StringChip(title: opt.title, value: opt.value, selection: $leaseDuration)
                         }
+                        CustomDurationChip(isCustom: !leaseDurationOptions.contains { $0.value == leaseDuration },
+                                           currentMinutes: customLeaseMinutes(leaseDuration)) { leaseDuration = "\($0)m" }
                     }
                     HStack(spacing: 6) {
                         Text("审批")
@@ -4691,7 +5008,7 @@ struct InviteSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 560)
+        .frame(width: 600)
         .onAppear {
             if autoGenerate { generate() }
         }
@@ -4874,7 +5191,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func updateStatusItemTitle(activeCount: Int) {
         guard let button = self.statusItem?.button else { return }
         let isConnected = PortRelayViewModel.shared.isConnected
-        let pendingCount = PortRelayViewModel.shared.pendingRequests.count
+        let pendingCount = PortRelayViewModel.shared.attentionCount
         var iconName = isConnected ? (activeCount > 0 ? "arrow.left.arrow.right.circle.fill" : "arrow.left.arrow.right.circle") : "exclamationmark.triangle"
         if pendingCount > 0 { iconName = "bell.badge.fill" }
         button.image = NSImage(systemSymbolName: iconName, accessibilityDescription: "PortRelay")
@@ -4899,6 +5216,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(statusItem)
 
         menu.addItem(NSMenuItem.separator())
+
+        // Renewal requests: pick how long to extend
+        let renewals = vm.renewalRequests
+        if !renewals.isEmpty {
+            let header = NSMenuItem(title: "申请延长 (\(renewals.count))：", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for (title, scope, rn) in renewals {
+                guard let r = rn.request else { continue }
+                let item = NSMenuItem(title: "\(r.name)（\(r.ip)）→ \(title)", action: nil, keyEquivalent: "")
+                let sub = NSMenu()
+                for opt in extendOptions {
+                    let ext = NSMenuItem(title: "批准延长 \(opt.1)", action: #selector(extendAction(_:)), keyEquivalent: "")
+                    ext.representedObject = [scope.key, r.ip, String(opt.0)]
+                    ext.target = self
+                    sub.addItem(ext)
+                }
+                sub.addItem(NSMenuItem.separator())
+                let reject = NSMenuItem(title: "拒绝", action: #selector(decideAction(_:)), keyEquivalent: "")
+                reject.representedObject = [scope.key, r.id, "0"]
+                reject.target = self
+                sub.addItem(reject)
+                item.submenu = sub
+                menu.addItem(item)
+            }
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // Pending approvals
         let pending = vm.pendingRequests
@@ -5001,6 +5345,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let id = sender.representedObject as? String else { return }
         Task {
             await PortRelayViewModel.shared.toggleTunnel(id: id)
+        }
+    }
+
+    @objc func extendAction(_ sender: NSMenuItem) {
+        guard let v = sender.representedObject as? [String], v.count == 3, let minutes = Int(v[2]) else { return }
+        let id = String(v[0].dropFirst(2))
+        let scope: AccessScope = v[0].hasPrefix("g:") ? .group(id) : .tunnel(id)
+        Task {
+            if let err = await PortRelayViewModel.shared.extendLease(scope: scope, ip: v[1], minutes: minutes) {
+                let content = UNMutableNotificationContent()
+                content.title = "延长失败"
+                content.body = err
+                try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+            }
         }
     }
 

@@ -54,10 +54,11 @@ PortRelay turns that into three steps:
 **Access control**
 
 - Three access modes: **invite-only** (the default and safest), an IP / CIDR allowlist (which can be combined with invites), and open to all.
-- Each invite link has its own expiry, device limit, access duration once granted (1 h, 2 h, 8 h, until end of day, or until the tunnel closes) and an optional approval step.
+- Each invite link has its own expiry, device limit, access duration once granted (30 min, 1 h, 2 h, 8 h, until end of day, until the tunnel closes, or a custom length) and an optional approval step.
 - When approval is required, the app shows a system notification and you approve or deny with one click. The requester's page refreshes on its own.
 - **The access clock starts at the first connection**, so a teammate can accept an invite now and use it later.
 - When access expires or is revoked, **existing connections are dropped too**. Unauthorized connections are reset (TCP RST) and logged.
+- **Extensions.** Within two hours after access ends (even if the tunnel has been closed), a teammate reopens the original link and clicks 申请延长 (Request extension). You approve it by picking a duration in the app, the menu bar or the web panel, and a closed tunnel reopens on its own. You can also extend a running or just-ended grant yourself.
 - **Tunnel groups**: the add-tunnel form takes a list of targets, one host per row with comma-separated ports (a pasted list of IPs is split into rows), creates one tunnel per address on a contiguous block of gateway ports and puts them in one group. A group shares one invite link and one set of grants: a teammate is authorized once for the whole group, and one revoke disconnects them everywhere.
 
 **Tunnel lifecycle**

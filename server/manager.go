@@ -240,7 +240,7 @@ func (m *Manager) handleControlMessage(as *agentSession, msgType string, raw []b
 	case protocol.TypeUnregister:
 		var msg protocol.UnregisterMessage
 		if json.Unmarshal(raw, &msg) == nil {
-			m.unregisterTunnel(as, msg.TunnelID)
+			m.unregisterTunnel(as, msg.TunnelID, msg.Deleted)
 			as.send(protocol.UnregisterRespMessage{Type: protocol.TypeUnregisterResp, TunnelID: msg.TunnelID, Success: true})
 		}
 
@@ -272,6 +272,12 @@ func (m *Manager) handleControlMessage(as *agentSession, msgType string, raw []b
 		var msg protocol.DecideRequestMessage
 		if json.Unmarshal(raw, &msg) == nil {
 			m.decideRequest(scopeOf(msg.TunnelID, msg.GroupID), msg.RequestID, msg.Approve)
+		}
+
+	case protocol.TypeExtendLease:
+		var msg protocol.ExtendLeaseMessage
+		if json.Unmarshal(raw, &msg) == nil {
+			as.send(m.extendLease(msg))
 		}
 
 	case protocol.TypeDeleteGroup:
@@ -349,14 +355,19 @@ func (m *Manager) registerTunnel(as *agentSession, cfg protocol.TunnelConfig) pr
 	return registerResp(cfg, nil)
 }
 
-func (m *Manager) unregisterTunnel(as *agentSession, tunnelID string) {
+func (m *Manager) unregisterTunnel(as *agentSession, tunnelID string, deleted bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.active != as {
 		return
 	}
-	// 主动关闭/删除通道时，放通、邀请链接与待审批申请一并失效（断线重连不会走到这里）
-	m.state.forgetScope(tunnelID)
+	// 主动关闭通道时，放通、邀请链接与待审批申请一并失效，已授权的设备 2 小时内仍可申请延长；
+	// 删除通道则全部清除（断线重连不会走到这里）
+	if deleted {
+		m.state.dropScope(tunnelID)
+	} else {
+		m.state.closeScope(tunnelID)
+	}
 	if t, exists := m.tunnels[tunnelID]; exists {
 		t.Close()
 		delete(m.portMap, t.ListenPort())
@@ -501,8 +512,12 @@ func scopeExpiresOf(tunnels []*Tunnel) *time.Time {
 // syncAccess makes a tunnel's temporary allowlist match the access state — its own leases plus
 // those of its group — and disconnects clients that are no longer permitted.
 func (m *Manager) syncAccess(t *Tunnel) int {
+	m.state.setName(t.ID(), t.Name())
 	leases := m.state.leaseExpiries(t.ID())
 	if gid := t.GroupID(); gid != "" {
+		if name := t.Snapshot().GroupName; name != "" {
+			m.state.setName(groupScope(gid), name)
+		}
 		for ip, exp := range m.state.leaseExpiries(groupScope(gid)) {
 			if cur, ok := leases[ip]; !ok || exp.After(cur) {
 				leases[ip] = exp
@@ -521,19 +536,19 @@ func (m *Manager) syncScope(scope string) int {
 	return kicked
 }
 
-// forgetGroupIfEmptyLocked drops a group's shared access state once none of its tunnels is open.
-// Caller must hold m.mu.
+// forgetGroupIfEmptyLocked closes a group's shared access state once none of its tunnels is open
+// (ended devices can still ask for an extension). Caller must hold m.mu.
 func (m *Manager) forgetGroupIfEmptyLocked(groupID string) {
 	if groupID == "" || len(m.groupMembersLocked(groupID)) > 0 {
 		return
 	}
-	m.state.forgetScope(groupScope(groupID))
+	m.state.closeScope(groupScope(groupID))
 }
 
-// deleteGroup drops a dissolved group's invites, leases and requests
+// deleteGroup drops a dissolved group's invites, leases, requests and renewal records
 func (m *Manager) deleteGroup(groupID string) {
 	scope := groupScope(groupID)
-	m.state.forgetScope(scope)
+	m.state.dropScope(scope)
 	kicked := m.syncScope(scope)
 	log.Printf("[WebAuth] Tunnel group %s dissolved, disconnected %d client(s)", groupID, kicked)
 }
@@ -569,9 +584,6 @@ func (m *Manager) revokeInvite(scope, code string) {
 
 func (m *Manager) decideRequest(scope, requestID string, approve bool) {
 	tunnels := m.scopeTunnels(scope)
-	if len(tunnels) == 0 {
-		return
-	}
 	r, _, err := m.state.decide(scope, requestID, approve, scopeExpiresOf(tunnels))
 	if err != nil {
 		return
@@ -580,6 +592,26 @@ func (m *Manager) decideRequest(scope, requestID string, approve bool) {
 		m.syncScope(scope)
 	}
 	log.Printf("[WebAuth] Request from %s (%s) on %s: %s", r.Name, r.IP, m.scopeName(scope), r.Status)
+}
+
+// extendLease extends a device's access (approving its renewal requests); the scope may be
+// closed — the Agent reopens it, and registering re-applies the lease.
+func (m *Manager) extendLease(msg protocol.ExtendLeaseMessage) protocol.ExtendLeaseRespMessage {
+	resp := protocol.ExtendLeaseRespMessage{Type: protocol.TypeExtendResp, RequestID: msg.RequestID}
+	scope := scopeOf(msg.TunnelID, msg.GroupID)
+	if msg.Minutes < 1 || msg.Minutes > protocol.MaxLeaseMinutes || msg.IP == "" {
+		resp.Error = "延长时长须在 1 分钟到 30 天之间"
+		return resp
+	}
+	exp, err := m.state.extendLease(scope, msg.IP, msg.Minutes)
+	if err != nil {
+		resp.Error = err.Error()
+		return resp
+	}
+	m.syncScope(scope)
+	resp.Success, resp.ExpiresAt = true, exp
+	log.Printf("[WebAuth] Extended %s on %s by %s, until %s", msg.IP, m.scopeName(scope), protocol.DescribeMinutes(msg.Minutes), exp.Format("01-02 15:04"))
+	return resp
 }
 
 // onClientConnect starts the countdown of a device's lease on its first connection.
@@ -678,6 +710,7 @@ func (m *Manager) metricsLoop(as *agentSession) {
 			Groups:         groupMetrics,
 			ActiveConns:    allActiveConns,
 			SecurityEvents: secCopy,
+			Renewals:       m.state.renewalList(),
 		})
 	}
 }

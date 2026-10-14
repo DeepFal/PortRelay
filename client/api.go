@@ -132,6 +132,19 @@ type TunnelWithMetrics struct {
 	EffectiveIdleCloseMinutes int `json:"effective_idle_close_minutes"`
 	// RateHistory 近 10 分钟流量曲线（仅开启中的通道）
 	RateHistory *RateSeries `json:"rate_history,omitempty"`
+	// Renewals 可延长的设备与延长申请（通道关闭后 2 小时内仍有）
+	Renewals []protocol.RenewalInfo `json:"renewals,omitempty"`
+}
+
+// renewalsOf picks the renewals of one tunnel (groupID empty) or one group
+func renewalsOf(all []protocol.RenewalInfo, tunnelID, groupID string) []protocol.RenewalInfo {
+	var out []protocol.RenewalInfo
+	for _, r := range all {
+		if (groupID != "" && r.GroupID == groupID) || (groupID == "" && r.GroupID == "" && r.TunnelID == tunnelID) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // tunnelsWithMetrics merges config, live metrics and registration errors into one consistent view.
@@ -167,6 +180,7 @@ func (s *APIServer) tunnelsWithMetrics(metrics protocol.MetricsMessage) []Tunnel
 			Metrics:                   tm,
 			Activity:                  s.agent.Activity(t),
 			EffectiveIdleCloseMinutes: IdleCloseMinutes(t),
+			Renewals:                  renewalsOf(metrics.Renewals, t.ID, ""),
 		}
 		if t.Enabled {
 			series := s.agent.RateSeries(t.ID)
@@ -265,7 +279,7 @@ func (s *APIServer) handleTunnelItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.agent.ConsumeSessionBytes(tunnelID)
-		s.agent.RemoveTunnel(tunnelID)
+		s.agent.DeleteTunnel(tunnelID)
 		jsonResponse(w, http.StatusOK, map[string]string{"status": "deleted"})
 
 	default:
@@ -376,6 +390,7 @@ func shareMessage(inv protocol.Invite, body, link string) string {
 	} else if inv.MaxUses > 1 {
 		b.WriteString(fmt.Sprintf("\n此链接最多 %d 台设备使用，请勿转发。", inv.MaxUses))
 	}
+	b.WriteString("\n授权结束后 2 小时内，可以重新打开此链接申请延长。")
 	return b.String()
 }
 
@@ -386,6 +401,7 @@ func isAccessPath(p string) bool {
 // handleAccess serves the access endpoints shared by tunnels and groups:
 //
 //	POST   leases/revoke            {"ip": "..."}（ip 为空表示撤销全部）
+//	POST   leases/extend            {"ip": "...", "minutes": 60} 延长授权（同时批准该设备的延长申请）
 //	POST   invites                  新建邀请
 //	DELETE invites/{code}           作废邀请
 //	GET    invites/{code}/share     分享文案
@@ -405,6 +421,26 @@ func (s *APIServer) handleAccess(w http.ResponseWriter, r *http.Request, sc Scop
 			return
 		}
 		jsonResponse(w, http.StatusOK, map[string]string{"status": "revoked"})
+
+	case len(rest) == 2 && rest[0] == "leases" && rest[1] == "extend" && r.Method == http.MethodPost:
+		var req struct {
+			IP      string `json:"ip"`
+			Minutes int    `json:"minutes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+		if req.Minutes < 1 || req.Minutes > protocol.MaxLeaseMinutes {
+			jsonError(w, http.StatusBadRequest, "延长时长须在 1 分钟到 30 天之间")
+			return
+		}
+		exp, err := s.extendAccess(sc, strings.TrimSpace(req.IP), req.Minutes)
+		if err != nil {
+			jsonError(w, http.StatusConflict, err.Error())
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]any{"expires_at": exp})
 
 	case rest[0] == "invites":
 		s.handleInvites(w, r, sc, rest[1:])
@@ -426,6 +462,75 @@ func (s *APIServer) handleAccess(w http.ResponseWriter, r *http.Request, sc Scop
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// extendAccess extends a device's access in a tunnel or group. Closed tunnels are reopened first
+// (a group reopens all its members), and each is kept open at least until the new expiry.
+func (s *APIServer) extendAccess(sc Scope, ip string, minutes int) (time.Time, error) {
+	if ip == "" {
+		return time.Time{}, fmt.Errorf("缺少设备 IP")
+	}
+	var members []protocol.TunnelConfig
+	if sc.GroupID != "" {
+		members = s.cm.GroupMembers(sc.GroupID)
+	} else if t, ok := s.cm.FindTunnel(sc.TunnelID); ok {
+		members = []protocol.TunnelConfig{t}
+	}
+	if len(members) == 0 {
+		return time.Time{}, fmt.Errorf("通道不存在或组内没有通道")
+	}
+	if !s.canExtend(sc, ip) {
+		return time.Time{}, fmt.Errorf("这台设备没有可延长的授权（访问结束已超过 2 小时或已被撤销）")
+	}
+	on := true
+	for _, t := range members {
+		if !t.Enabled {
+			if _, err := s.setEnabled(t.ID, &on); err != nil {
+				return time.Time{}, err
+			}
+		}
+	}
+	exp, err := s.agent.ExtendLease(sc, ip, minutes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, t := range members {
+		if updated, changed, err := s.cm.ExtendUntil(t.ID, exp); err == nil && changed {
+			s.agent.SyncTunnel(updated, true)
+		}
+	}
+	return exp, nil
+}
+
+// canExtend reports whether ip has a running lease, or an access ended within two hours, in the scope.
+// 先检查再开启通道，避免对没有可延长授权的设备白白打开通道。
+func (s *APIServer) canExtend(sc Scope, ip string) bool {
+	metrics := s.agent.GetLatestMetrics()
+	for _, r := range renewalsOf(metrics.Renewals, sc.TunnelID, sc.GroupID) {
+		if r.IP == ip {
+			return true
+		}
+	}
+	var leases []protocol.DynamicLease
+	if sc.GroupID != "" {
+		for _, g := range metrics.Groups {
+			if g.GroupID == sc.GroupID {
+				leases = g.DynamicLeases
+			}
+		}
+	} else {
+		for _, t := range metrics.Tunnels {
+			if t.TunnelID == sc.TunnelID {
+				leases = t.DynamicLeases
+			}
+		}
+	}
+	for _, l := range leases {
+		if l.IP == ip {
+			return true
+		}
+	}
+	return false
 }
 
 // scopeShare builds the share message for an invite of a tunnel or group

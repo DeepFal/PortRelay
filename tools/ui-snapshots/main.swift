@@ -281,6 +281,18 @@ MainActor.assumeIsolated {
     render("group-history-addr", CGSize(width: 760, height: 520), ClientDetailsSheet(vm: demo, scope: .group(g.id), initialTab: 1, byAddress: true, isPresented: yes))
     render("group-edit-member", CGSize(width: 520, height: 800), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[3], isPresented: yes))
 
+    // 授权延长：申请延长、最近结束、已授权设备的「延长」
+    let rvm = makeDemoVM()
+    rvm.tunnels[0].renewals = decode([RenewalItem].self, """
+    [{"tunnel_id":"\(rvm.tunnels[0].id)","ip":"192.168.1.35","name":"李四","invite":"ab1","ended_at":"\(t(-1200))","renew_before":"\(t(6000))",
+      "request":{"id":"rn1","tunnel_id":"\(rvm.tunnels[0].id)","name":"李四","ip":"192.168.1.35","invite":"ab1","at":"\(t(-60))","status":"pending","renewal":true}},
+     {"tunnel_id":"\(rvm.tunnels[0].id)","ip":"192.168.1.36","name":"王五","invite":"ab2","ended_at":"\(t(-3000))","renew_before":"\(t(4200))"}]
+    """)
+    render("renew-access", CGSize(width: 760, height: 620), ClientDetailsSheet(vm: rvm, tunnel: rvm.tunnels[0], initialTab: 2, isPresented: yes))
+    render("renew-card", CGSize(width: 980, height: 220), TunnelCardView(tunnel: rvm.tunnels[0], vm: rvm, onEdit: {}, onViewClients: {}, onViewLeases: {}, onInvite: {}).padding(20))
+    render("renew-invite-form", CGSize(width: 600, height: 400), InviteSheet(vm: rvm, tunnel: rvm.tunnels[0], autoGenerate: false, isPresented: yes))
+    render("renew-custom", CGSize(width: 300, height: 90), CustomMinutesForm(actionTitle: "延长") { _ in })
+
     // README 动图逐帧：卡片随时间推移（每帧 = 5 秒）
     if only.hasPrefix("gif") {
         let frames = Int(ProcessInfo.processInfo.environment["FRAMES"] ?? "") ?? 40

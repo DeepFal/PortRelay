@@ -16,6 +16,8 @@ type GroupView struct {
 	Metrics   protocol.GroupMetrics `json:"metrics"`
 	// RateHistory 开启中成员的近 10 分钟流量之和
 	RateHistory *RateSeries `json:"rate_history,omitempty"`
+	// Renewals 可延长的设备与延长申请（组关闭后 2 小时内仍有）
+	Renewals []protocol.RenewalInfo `json:"renewals,omitempty"`
 }
 
 func (s *APIServer) groupsView(metrics protocol.MetricsMessage) []GroupView {
@@ -26,7 +28,8 @@ func (s *APIServer) groupsView(metrics protocol.MetricsMessage) []GroupView {
 	cfg := s.cm.Get()
 	out := make([]GroupView, 0, len(cfg.Groups))
 	for _, g := range cfg.Groups {
-		v := GroupView{TunnelGroup: g, TunnelIDs: make([]string, 0), Metrics: protocol.GroupMetrics{GroupID: g.ID}}
+		v := GroupView{TunnelGroup: g, TunnelIDs: make([]string, 0), Metrics: protocol.GroupMetrics{GroupID: g.ID},
+			Renewals: renewalsOf(metrics.Renewals, "", g.ID)}
 		if m, ok := shared[g.ID]; ok {
 			v.Metrics = m
 		}
@@ -183,7 +186,7 @@ func (s *APIServer) handleGroupItem(w http.ResponseWriter, r *http.Request) {
 			if deleteMembers {
 				s.agent.ConsumeSessionBytes(t.ID)
 				s.agent.dropUsage(t.ID)
-				s.agent.RemoveTunnel(t.ID)
+				s.agent.DeleteTunnel(t.ID)
 			} else if t.Enabled {
 				s.agent.SyncTunnel(t, true)
 			}
