@@ -163,6 +163,12 @@ func makeDemoVM(tick: Int = 0) -> PortRelayViewModel {
                    {"code":"gx2","note":"测试组","created_at":"\(t(-100))","expires_at":"\(t(86000))","max_uses":3,"lease_duration":"today","require_approval":true}]}}]
     """)
     vm.groups[0].rate_history = RateSeriesItem(end: ga.end, step: 5, up: zip(ga.up, gb.up).map { $0 + $1 }, down: zip(ga.down, gb.down).map { $0 + $1 })
+    // 授权延长：赵六的访问 20 分钟前结束，刚申请延长；王五结束不到 2 小时，还可以延长
+    vm.tunnels[0].renewals = decode([RenewalItem].self, """
+    [{"tunnel_id":"t1","ip":"192.168.1.47","name":"赵六","invite":"ab1","ended_at":"\(t(-1200))","renew_before":"\(t(6000))",
+      "request":{"id":"rn1","tunnel_id":"t1","name":"赵六","ip":"192.168.1.47","invite":"ab1","at":"\(t(-60))","status":"pending","renewal":true}},
+     {"tunnel_id":"t1","ip":"192.168.1.36","name":"王五","invite":"ab2","ended_at":"\(t(-3000))","renew_before":"\(t(4200))"}]
+    """)
     // 卡片与顶部统计的实时速率取曲线最后一个点
     var totalIn: Int64 = 0, totalOut: Int64 = 0
     for i in [0, 1, 3, 4] {
@@ -283,15 +289,9 @@ MainActor.assumeIsolated {
     render("group-edit-member", CGSize(width: 520, height: 800), TunnelEditSheet(vm: demo, tunnel: demo.tunnels[3], isPresented: yes))
 
     // 授权延长：申请延长、最近结束、已授权设备的「延长」
-    let rvm = makeDemoVM()
-    rvm.tunnels[0].renewals = decode([RenewalItem].self, """
-    [{"tunnel_id":"\(rvm.tunnels[0].id)","ip":"192.168.1.47","name":"赵六","invite":"ab1","ended_at":"\(t(-1200))","renew_before":"\(t(6000))",
-      "request":{"id":"rn1","tunnel_id":"\(rvm.tunnels[0].id)","name":"赵六","ip":"192.168.1.47","invite":"ab1","at":"\(t(-60))","status":"pending","renewal":true}},
-     {"tunnel_id":"\(rvm.tunnels[0].id)","ip":"192.168.1.36","name":"王五","invite":"ab2","ended_at":"\(t(-3000))","renew_before":"\(t(4200))"}]
-    """)
-    render("readme-access", CGSize(width: 760, height: 800), ClientDetailsSheet(vm: rvm, tunnel: rvm.tunnels[0], initialTab: 2, isPresented: yes))
-    render("renew-card", CGSize(width: 980, height: 220), TunnelCardView(tunnel: rvm.tunnels[0], vm: rvm, onEdit: {}, onViewClients: {}, onViewLeases: {}, onInvite: {}).padding(20))
-    render("renew-invite-form", CGSize(width: 600, height: 400), InviteSheet(vm: rvm, tunnel: rvm.tunnels[0], autoGenerate: false, isPresented: yes))
+    render("readme-access", CGSize(width: 760, height: 800), ClientDetailsSheet(vm: demo, tunnel: demo.tunnels[0], initialTab: 2, isPresented: yes))
+    render("renew-card", CGSize(width: 980, height: 220), TunnelCardView(tunnel: demo.tunnels[0], vm: demo, onEdit: {}, onViewClients: {}, onViewLeases: {}, onInvite: {}).padding(20))
+    render("renew-invite-form", CGSize(width: 600, height: 400), InviteSheet(vm: demo, tunnel: demo.tunnels[0], autoGenerate: false, isPresented: yes))
     render("renew-custom", CGSize(width: 300, height: 90), CustomMinutesForm(actionTitle: "延长") { _ in })
 
     // README 动图逐帧：卡片随时间推移（每帧 = 5 秒）

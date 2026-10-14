@@ -85,7 +85,7 @@ PortRelay turns that into three steps:
 
 <p align="center">
   <img src="docs/images/live-traffic.gif" alt="Tunnel card with live traffic" width="100%">
-  <br><sub>A tunnel card: access address, grants, connected time and the last 10 minutes of traffic (sped up)</sub>
+  <br><sub>A tunnel card: access address, pending access and extension requests, connected time and the last 10 minutes of traffic (sped up)</sub>
 </p>
 
 <picture>
@@ -107,7 +107,7 @@ PortRelay turns that into three steps:
   </tr>
 </table>
 
-When access is about to run out or has just ended, the teammate opens the same link again, sees where their access stands and asks for more time. Once you pick a duration, the page shows the new expiry.
+**Extensions.** When access is about to run out or has just ended, the teammate opens the same link again, sees where their access stands and asks for more time. You don't need to send a new invite.
 
 <table>
   <tr>
@@ -117,16 +117,16 @@ When access is about to run out or has just ended, the teammate opens the same l
   </tr>
 </table>
 
+On your side, the tunnel card shows 申请延长 (Extension requested). Open 连接与授权 (Connections & access): extension requests are listed first, and you approve one by clicking 批准延长 (Approve) and picking a duration. The teammate's page then shows the new expiry. The same view lists pending access requests, authorized devices (with online state and remaining time), recently ended grants and active invite links, and a device whose access just ended can be extended from there too.
+
+<p align="center">
+  <img src="docs/images/app-access.png" alt="Access management: extension requests, pending requests, authorized devices, recently ended" width="80%">
+</p>
+
 **Tunnel groups.** A group card sums up the state and traffic of the whole group and lists every access address. Each address can be switched, invited or moved out on its own.
 
 <p align="center">
   <img src="docs/images/app-group.png" alt="Tunnel group" width="100%">
-</p>
-
-**Access management.** Access and extension requests, authorized devices (with online state and remaining time), recently ended grants and active invite links all live here. Extending a device takes one pick of a duration, with no new link to send.
-
-<p align="center">
-  <img src="docs/images/app-access.png" alt="Access management" width="80%">
 </p>
 
 <details>
